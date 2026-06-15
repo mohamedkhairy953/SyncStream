@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Base theme used before Compose takes over; Compose theme is in ui/theme/Theme.kt. -->
+    <style name="Theme.SyncStream" parent="android:Theme.Material.NoActionBar" />
+</resources>
