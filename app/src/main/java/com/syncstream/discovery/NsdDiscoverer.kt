@@ -179,6 +179,7 @@ class NsdDiscoverer(private val context: Context) {
             }
         }
 
+        Log.i(TAG, "▶ resolveService('${info.serviceName}') attempt=${retryCount}")
         try {
             nsdManager.resolveService(info, listener)
         } catch (e: Exception) {
@@ -236,12 +237,12 @@ class NsdDiscoverer(private val context: Context) {
             label = label,
         )
 
-        Log.i(TAG, "Resolved service: $discovered")
-
         _services.update { current ->
             // De-duplicate by serviceName; replace if already present (refresh).
             val filtered = current.filter { it.serviceName != discovered.serviceName }
-            filtered + discovered
+            val next = filtered + discovered
+            Log.i(TAG, "▶ RESOLVED $discovered — list size ${current.size} -> ${next.size}")
+            next
         }
     }
 

@@ -68,7 +68,7 @@ class NsdAdvertiser(private val context: Context) {
             override fun onServiceRegistered(registeredInfo: NsdServiceInfo) {
                 // NsdManager may auto-rename to avoid conflicts; use the returned name.
                 val name = registeredInfo.serviceName
-                Log.i(TAG, "Service registered as '$name'")
+                Log.i(TAG, "▶ onServiceRegistered as '$name' — now advertising on the network")
                 _state.value = AdvertiseState.Registered(name)
             }
 
@@ -94,6 +94,7 @@ class NsdAdvertiser(private val context: Context) {
 
         registrationListener = listener
         _state.value = AdvertiseState.Registering
+        Log.i(TAG, "▶ registerService('SyncStream', type='$SERVICE_TYPE', port=$port, label='$sessionLabel')")
         nsdManager.registerService(serviceInfo, NsdManager.PROTOCOL_DNS_SD, listener)
     }
 
