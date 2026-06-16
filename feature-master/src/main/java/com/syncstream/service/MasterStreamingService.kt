@@ -237,7 +237,7 @@ class MasterStreamingService : LifecycleService() {
             scope = serviceScope,
         )
         signalingServer = server
-        val boundPort = server.start(PREFERRED_PORT)
+        val boundPort = server.start(SIGNALING_PORT)
 
         val nsd = NsdAdvertiser(applicationContext)
         advertiser = nsd
@@ -342,6 +342,13 @@ class MasterStreamingService : LifecycleService() {
 
         _advertise.value = AdvertiseState.Idle
         _thermalWarning.value = false
+
+        // Clear the session identity set in startStreaming(). MasterScreen derives its live/
+        // "streaming" state from pin.isNotEmpty(); leaving these populated would leave the UI
+        // showing a phantom live session after a stop, even though NSD is unregistered and nothing
+        // is advertising — so clients could never find this master again until the process died.
+        _pin.value = ""
+        _sessionLabel.value = ""
 
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
     }
@@ -539,7 +546,12 @@ class MasterStreamingService : LifecycleService() {
         const val EXTRA_MEDIA_URI = "extra_media_uri"
 
         private const val MAX_CLIENTS = 4
-        private const val PREFERRED_PORT = 0 // 0 -> OS picks a free ephemeral port
+        // Fixed signaling port so a client's discovered host:port stays valid across master
+        // restarts. An ephemeral port (0) changes every session, orphaning any client that
+        // resolved the previous one: it then retries a dead port forever ("Connection refused")
+        // and hangs on "connecting to master". SignalingServer falls back to an ephemeral port if
+        // this one is somehow already in use. Chosen below the Linux ephemeral range (32768+).
+        private const val SIGNALING_PORT = 31415
         private const val HEARTBEAT_MS = 1_000L
         private const val WAKELOCK_TIMEOUT_MS = 6L * 60 * 60 * 1000 // 6h safety cap
         private const val CHANNEL_ID = "syncstream_master"

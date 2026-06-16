@@ -71,6 +71,21 @@ class SignalingServer(
      */
     fun start(port: Int): Int {
         server?.let { return boundPort(it) }
+        return try {
+            startOn(port)
+        } catch (t: Throwable) {
+            // Fixed port already in use (or otherwise unbindable): fall back to an ephemeral one so
+            // hosting still works. Clients discover the actual port via NSD, so this stays usable
+            // within the session (only cross-restart stability is lost in this rare case).
+            Log.w(TAG, "Bind on port $port failed (${t.message}); falling back to an ephemeral port", t)
+            runCatching { server?.stop(0, 0) }
+            server = null
+            startOn(0)
+        }
+    }
+
+    /** Binds the embedded server on [port] (0 = ephemeral) and returns the resolved bound port. */
+    private fun startOn(port: Int): Int {
         val engine = embeddedServer(CIO, port = port, host = BIND_HOST) {
             install(WebSockets) {
                 pingPeriodMillis = 15.seconds.inWholeMilliseconds

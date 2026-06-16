@@ -78,7 +78,6 @@ fun MasterScreen(
     onExit: () -> Unit,
     viewModel: MasterViewModel = viewModel(),
 ) {
-    val bound by viewModel.bound.collectAsStateWithLifecycle()
     val pin by viewModel.pin.collectAsStateWithLifecycle()
     val sessionLabel by viewModel.sessionLabel.collectAsStateWithLifecycle()
     val clients by viewModel.clients.collectAsStateWithLifecycle()
@@ -160,30 +159,41 @@ fun MasterScreen(
                 )
             }
 
-            // ---- Start / stop ----
+            // ---- Playback controls ----
+            // The session goes live automatically on entering this screen (see MasterViewModel),
+            // so the master is discoverable/joinable before any video is picked. Playback controls
+            // appear once a video is selected; "Stop hosting" ends the session and leaves.
             if (!streaming) {
-                Button(
-                    onClick = { viewModel.startStreaming() },
-                    enabled = bound && selectedUri != null,
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("Start streaming") }
-            } else {
-                TransportControls(
-                    playing = playback.playing,
-                    positionMs = playback.positionMs,
-                    durationMs = playback.durationMs,
-                    onPlay = viewModel::play,
-                    onPause = viewModel::pause,
-                    onSeek = viewModel::seekTo,
-                    onLoopChanged = viewModel::setLoop,
+                Text(
+                    "Going live…",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            } else {
+                if (selectedUri != null) {
+                    TransportControls(
+                        playing = playback.playing,
+                        positionMs = playback.positionMs,
+                        durationMs = playback.durationMs,
+                        onPlay = viewModel::play,
+                        onPause = viewModel::pause,
+                        onSeek = viewModel::seekTo,
+                        onLoopChanged = viewModel::setLoop,
+                    )
+                } else {
+                    Text(
+                        "Clients can already find and join this master. Pick a video to start playback.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 OutlinedButton(
                     onClick = {
                         viewModel.stopStreaming()
                         onExit()
                     },
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("Stop streaming") }
+                ) { Text("Stop hosting") }
             }
 
             ClientList(clients = clients)

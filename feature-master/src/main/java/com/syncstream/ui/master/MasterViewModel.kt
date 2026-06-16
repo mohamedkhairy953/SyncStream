@@ -71,7 +71,10 @@ class MasterViewModel(app: Application) : AndroidViewModel(app) {
             service = svc
             _bound.value = true
             observeService(svc)
-            // If a media uri was picked before binding, forward it now.
+            // Go live as soon as the screen binds, so clients can discover and join this master
+            // BEFORE a video is picked. startStreaming() is idempotent and does not require media;
+            // the selected URI (if any) is loaded into the already-live session below.
+            svc.startStreaming()
             _selectedUri.value?.let { svc.setMediaUri(it) }
         }
 
