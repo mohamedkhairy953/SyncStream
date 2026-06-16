@@ -56,6 +56,9 @@ class MasterViewModel(app: Application) : AndroidViewModel(app) {
     private val _notificationsDenied = MutableStateFlow(false)
     val notificationsDenied: StateFlow<Boolean> = _notificationsDenied.asStateFlow()
 
+    private val _loop = MutableStateFlow(false)
+    val loop: StateFlow<Boolean> = _loop.asStateFlow()
+
     private val _selectedUri = MutableStateFlow<Uri?>(null)
     val selectedUri: StateFlow<Uri?> = _selectedUri.asStateFlow()
 
@@ -124,7 +127,10 @@ class MasterViewModel(app: Application) : AndroidViewModel(app) {
     fun play() { service?.play() }
     fun pause() { service?.pause() }
     fun seekTo(positionMs: Long) { service?.seekTo(positionMs) }
-    fun setLoop(enabled: Boolean) { service?.setLoop(enabled) }
+    fun setLoop(enabled: Boolean) {
+        _loop.value = enabled
+        service?.setLoop(enabled)
+    }
 
     /** Whether POST_NOTIFICATIONS is currently granted (used to drive the runtime request). */
     fun hasNotificationPermission(): Boolean {

@@ -23,8 +23,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -32,21 +30,16 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Slider
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -57,7 +50,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.syncstream.discovery.AdvertiseState
 import com.syncstream.signaling.ClientHandle
 import com.syncstream.core.PeerState
@@ -65,31 +57,34 @@ import org.webrtc.RendererCommon
 import org.webrtc.SurfaceViewRenderer
 
 /**
- * Master control surface. Binds [com.syncstream.service.MasterStreamingService] (via the
- * ViewModel) and observes its [androidx.lifecycle.Lifecycle]-aware StateFlows. Provides the SAF
+ * Master setup surface (pre-player). Binds [com.syncstream.service.MasterStreamingService] (via
+ * the ViewModel) and observes its [androidx.lifecycle.Lifecycle]-aware StateFlows. Provides the SAF
  * pickers (primary `OpenDocument(video MIME)` + secondary `PickVisualMedia(VideoOnly)`), the local
- * preview (`SurfaceViewRenderer` added once, sink removed THEN released in the DisposableEffect),
- * transport controls, loop toggle, the connected-client list, the thermal chip and the notification
- * permission banner.
+ * 16:9 preview (`SurfaceViewRenderer` added once, sink removed THEN released in the
+ * DisposableEffect), the connected-client list, the thermal chip and the notification permission
+ * banner. Transport controls live in [MasterPlayerScreen].
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MasterScreen(
+    viewModel: MasterViewModel,
+    onStartStreaming: () -> Unit,
     onExit: () -> Unit,
-    viewModel: MasterViewModel = viewModel(),
 ) {
     val pin by viewModel.pin.collectAsStateWithLifecycle()
     val sessionLabel by viewModel.sessionLabel.collectAsStateWithLifecycle()
     val clients by viewModel.clients.collectAsStateWithLifecycle()
-    val playback by viewModel.playback.collectAsStateWithLifecycle()
     val advertise by viewModel.advertise.collectAsStateWithLifecycle()
     val thermalWarning by viewModel.thermalWarning.collectAsStateWithLifecycle()
     val notificationsDenied by viewModel.notificationsDenied.collectAsStateWithLifecycle()
     val selectedUri by viewModel.selectedUri.collectAsStateWithLifecycle()
 
-    // Bind the service while the screen is in the foreground.
+    // Bind the service while the screen is in the foreground. NOTE: we intentionally do NOT unbind
+    // on dispose. This composable leaves composition when navigating forward to MasterPlayerScreen,
+    // and unbinding there would null out the shared service reference — leaving the player stuck on
+    // "Preparing…" (eglContext/videoSource read null). The ViewModel is scoped to the masterGraph
+    // back-stack entry, so unbind() runs in onCleared() when the whole master flow is popped.
     LifecycleEventEffect(Lifecycle.Event.ON_START) { viewModel.bind() }
-    DisposableEffect(Unit) { onDispose { viewModel.unbind() } }
 
     // POST_NOTIFICATIONS runtime request (API 33+).
     val notifLauncher = rememberLauncherForActivityResult(
@@ -159,10 +154,11 @@ fun MasterScreen(
                 )
             }
 
-            // ---- Playback controls ----
+            // ---- Streaming controls ----
             // The session goes live automatically on entering this screen (see MasterViewModel),
-            // so the master is discoverable/joinable before any video is picked. Playback controls
-            // appear once a video is selected; "Stop hosting" ends the session and leaves.
+            // so the master is discoverable/joinable before any video is picked. "Start streaming"
+            // navigates to the full-screen player once a video has been selected; "Stop hosting"
+            // ends the session and leaves.
             if (!streaming) {
                 Text(
                     "Going live…",
@@ -170,28 +166,20 @@ fun MasterScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             } else {
-                if (selectedUri != null) {
-                    TransportControls(
-                        playing = playback.playing,
-                        positionMs = playback.positionMs,
-                        durationMs = playback.durationMs,
-                        onPlay = viewModel::play,
-                        onPause = viewModel::pause,
-                        onSeek = viewModel::seekTo,
-                        onLoopChanged = viewModel::setLoop,
-                    )
-                } else {
+                if (selectedUri == null) {
                     Text(
                         "Clients can already find and join this master. Pick a video to start playback.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                Button(
+                    onClick = onStartStreaming,
+                    enabled = selectedUri != null,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Start streaming") }
                 OutlinedButton(
-                    onClick = {
-                        viewModel.stopStreaming()
-                        onExit()
-                    },
+                    onClick = onExit,
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("Stop hosting") }
             }
@@ -285,67 +273,6 @@ private fun PreviewBox(viewModel: MasterViewModel, active: Boolean) {
                 }
                 holder.view = null
             }
-        }
-    }
-}
-
-@Composable
-private fun TransportControls(
-    playing: Boolean,
-    positionMs: Long,
-    durationMs: Long,
-    onPlay: () -> Unit,
-    onPause: () -> Unit,
-    onSeek: (Long) -> Unit,
-    onLoopChanged: (Boolean) -> Unit,
-) {
-    var scrubbing by remember { mutableStateOf(false) }
-    var scrubValue by remember { mutableStateOf(0f) }
-    var loop by remember { mutableStateOf(false) }
-
-    val duration = durationMs.coerceAtLeast(0L)
-    val sliderMax = duration.coerceAtLeast(1L).toFloat()
-    val sliderValue = if (scrubbing) scrubValue else positionMs.toFloat().coerceIn(0f, sliderMax)
-
-    Column(Modifier.fillMaxWidth()) {
-        Slider(
-            value = sliderValue,
-            onValueChange = {
-                scrubbing = true
-                scrubValue = it
-            },
-            onValueChangeFinished = {
-                scrubbing = false
-                onSeek(scrubValue.toLong())
-            },
-            valueRange = 0f..sliderMax,
-            enabled = duration > 0,
-        )
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(formatMs(sliderValue.toLong()), style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
-            Text(formatMs(duration), style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
-        }
-        Spacer(Modifier.height(8.dp))
-        Row(
-            Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            FilledIconButton(onClick = { if (playing) onPause() else onPlay() }) {
-                Icon(
-                    if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                    contentDescription = if (playing) "Pause" else "Play",
-                )
-            }
-            Spacer(Modifier.weight(1f))
-            Text("Loop", style = MaterialTheme.typography.labelLarge)
-            Switch(
-                checked = loop,
-                onCheckedChange = {
-                    loop = it
-                    onLoopChanged(it)
-                },
-            )
         }
     }
 }
@@ -462,10 +389,3 @@ private fun NotificationBanner(onGrant: () -> Unit, onStop: () -> Unit) {
     }
 }
 
-private fun formatMs(ms: Long): String {
-    if (ms <= 0) return "0:00"
-    val totalSeconds = ms / 1000
-    val minutes = totalSeconds / 60
-    val seconds = totalSeconds % 60
-    return "%d:%02d".format(minutes, seconds)
-}
