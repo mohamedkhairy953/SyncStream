@@ -1,4 +1,5 @@
 pluginManagement {
+    includeBuild("build-logic")
     repositories {
         google {
             content {
@@ -22,3 +23,12 @@ dependencyResolutionManagement {
 
 rootProject.name = "SyncStream"
 include(":app")
+include(":core")
+include(":design")
+include(":discovery")
+include(":signaling")
+include(":sync")
+include(":webrtc")
+include(":player")
+include(":feature-client")
+include(":feature-master")

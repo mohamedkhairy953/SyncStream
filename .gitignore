@@ -3,8 +3,8 @@
 /local.properties
 /.idea
 .DS_Store
-/build
-/app/build
+# Ignore Gradle build outputs in every module (root, app, libraries, build-logic).
+build/
 /captures
 .externalNativeBuild
 .cxx

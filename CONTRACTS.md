@@ -605,7 +605,7 @@ Shows playhead, latency badge, mute toggle (default muted), connection/ended ove
 
 ## Shared type sources (already defined — import, don't redeclare)
 
-- `PeerState` -> `com.syncstream.signaling.ClientFsm`
+- `PeerState` -> `com.syncstream.core` (moved from `signaling` during modularization to keep `:webrtc` off Ktor)
 - `ClientHandle` -> `com.syncstream.signaling.ClientRegistry`
 - `AdvertiseState`, `DiscoveredService`, `DiscoveryState` -> `com.syncstream.discovery`
 - `ConnectionState` -> `com.syncstream.signaling.SignalingClient`

@@ -7,13 +7,8 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <!-- mDNS / NSD multicast. -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
-    <!-- Foreground streaming service (mediaPlayback). -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
-    <!-- Notifications for the FGS (runtime on API 33+). -->
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- Keep CPU/Wi-Fi awake while streaming. -->
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- FGS / WAKE_LOCK / POST_NOTIFICATIONS are contributed by :feature-master's manifest. -->
 
     <!-- Explicitly NO RECORD_AUDIO and NO storage permissions (SAF + DataChannel PCM only). -->
 

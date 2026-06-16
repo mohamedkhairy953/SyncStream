@@ -8,9 +8,9 @@ import org.webrtc.PeerConnectionFactory
  * owns the app-scoped [AppContainer]. Activities/services read [container]; nothing else
  * constructs app-scoped singletons.
  */
-class SyncStreamApp : Application() {
+class SyncStreamApp : Application(), AppContainerHolder {
 
-    lateinit var container: AppContainer
+    override lateinit var container: AppContainer
         private set
 
     override fun onCreate() {
@@ -26,7 +26,3 @@ class SyncStreamApp : Application() {
         container = AppContainer(this)
     }
 }
-
-/** Convenience accessor for the [AppContainer] from any [android.content.Context]. */
-val android.content.Context.appContainer: AppContainer
-    get() = (applicationContext as SyncStreamApp).container
