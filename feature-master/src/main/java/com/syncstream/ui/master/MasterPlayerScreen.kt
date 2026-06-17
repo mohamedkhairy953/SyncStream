@@ -11,9 +11,12 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -30,6 +33,7 @@ import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.outlined.People
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -121,15 +125,23 @@ fun MasterPlayerScreen(
     // ---- Hardware back -> setup, keep hosting ----
     BackHandler { onBack() }
 
+    // Reads the live state at tap time (not a value captured into pointerInput's lambda).
+    val togglePlayPause = {
+        val pb = viewModel.playback.value
+        when {
+            pb.playing -> viewModel.pause()
+            pb.ended -> { viewModel.seekTo(0L); viewModel.play() }
+            else -> viewModel.play()
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
             // Tap the video to toggle play/pause.
             .pointerInput(Unit) {
-                detectTapGestures {
-                    if (playback.playing) viewModel.pause() else viewModel.play()
-                }
+                detectTapGestures { togglePlayPause() }
             },
     ) {
         // ---- Video layer ----
@@ -141,23 +153,49 @@ fun MasterPlayerScreen(
                 modifier = Modifier.align(Alignment.Center),
             )
         } else {
+            // Aspect ratio of the actual decoded video (w/h after display rotation). 0 until the
+            // first frame's resolution is known. Reported by the renderer's onFrameResolutionChanged.
+            var videoAspect by remember { mutableFloatStateOf(0f) }
             val holder = remember { object { var view: SurfaceViewRenderer? = null } }
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { ctx ->
-                    SurfaceViewRenderer(ctx).apply {
-                        layoutParams = ViewGroup.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                        )
-                        init(eglContext, null)
-                        setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
-                        setEnableHardwareScaler(true)
-                        holder.view = this
-                        videoSource.addPreviewSink(this)
-                    }
-                },
-            )
+
+            BoxWithConstraints(Modifier.fillMaxSize()) {
+                // Letterbox/pillarbox: size the surface to the video aspect and centre it on black,
+                // always fitting inside the current screen bounds (recomputed on rotation).
+                val screenAspect = maxWidth / maxHeight
+                val surfaceModifier = when {
+                    videoAspect <= 0f -> Modifier.fillMaxSize()
+                    videoAspect >= screenAspect -> Modifier.fillMaxWidth().aspectRatio(videoAspect)
+                    else -> Modifier.fillMaxHeight().aspectRatio(videoAspect)
+                }
+                AndroidView(
+                    modifier = surfaceModifier.align(Alignment.Center),
+                    factory = { ctx ->
+                        SurfaceViewRenderer(ctx).apply {
+                            layoutParams = ViewGroup.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                            )
+                            init(
+                                eglContext,
+                                object : RendererCommon.RendererEvents {
+                                    override fun onFirstFrameRendered() {}
+                                    override fun onFrameResolutionChanged(w: Int, h: Int, rotation: Int) {
+                                        if (w > 0 && h > 0) {
+                                            videoAspect =
+                                                if (rotation % 180 == 0) w.toFloat() / h
+                                                else h.toFloat() / w
+                                        }
+                                    }
+                                },
+                            )
+                            setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
+                            setEnableHardwareScaler(false)
+                            holder.view = this
+                            videoSource.addPreviewSink(this)
+                        }
+                    },
+                )
+            }
             DisposableEffect(videoSource) {
                 onDispose {
                     holder.view?.let { v ->
@@ -194,7 +232,7 @@ fun MasterPlayerScreen(
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
-                    ) { viewModel.play() },
+                    ) { togglePlayPause() },
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
@@ -268,6 +306,7 @@ private fun TopBar(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun BottomPanel(
     positionMs: Long,
@@ -338,6 +377,8 @@ private fun BottomPanel(
                     activeTrackColor = MaterialTheme.colorScheme.primary,
                     inactiveTrackColor = Color.White.copy(alpha = 0.3f),
                 ),
+                // No grab handle — a clean progress line.
+                thumb = {},
                 modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
             )
             Text(

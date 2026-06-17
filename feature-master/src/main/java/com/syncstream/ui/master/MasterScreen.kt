@@ -4,7 +4,6 @@ import android.Manifest
 import android.os.Build
 import android.view.ViewGroup
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -59,7 +58,7 @@ import org.webrtc.SurfaceViewRenderer
 /**
  * Master setup surface (pre-player). Binds [com.syncstream.service.MasterStreamingService] (via
  * the ViewModel) and observes its [androidx.lifecycle.Lifecycle]-aware StateFlows. Provides the SAF
- * pickers (primary `OpenDocument(video MIME)` + secondary `PickVisualMedia(VideoOnly)`), the local
+ * picker (`OpenDocument(video MIME)`), the local
  * 16:9 preview (`SurfaceViewRenderer` added once, sink removed THEN released in the
  * DisposableEffect), the connected-client list, the thermal chip and the notification permission
  * banner. Transport controls live in [MasterPlayerScreen].
@@ -91,13 +90,9 @@ fun MasterScreen(
         ActivityResultContracts.RequestPermission(),
     ) { /* result reflected via service.notificationsDenied after start */ }
 
-    // ---- File pickers ----
+    // ---- File picker ----
     val openDocumentLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
-    ) { uri -> uri?.let(viewModel::onMediaPicked) }
-
-    val pickVisualMediaLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.PickVisualMedia(),
     ) { uri -> uri?.let(viewModel::onMediaPicked) }
 
     val streaming = pin.isNotEmpty()
@@ -130,21 +125,11 @@ fun MasterScreen(
 
             PreviewBox(viewModel = viewModel, active = streaming)
 
-            // ---- Source pickers ----
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                OutlinedButton(
-                    onClick = { openDocumentLauncher.launch(arrayOf("video/*")) },
-                    modifier = Modifier.weight(1f),
-                ) { Text("Pick video (SAF)") }
-                OutlinedButton(
-                    onClick = {
-                        pickVisualMediaLauncher.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly),
-                        )
-                    },
-                    modifier = Modifier.weight(1f),
-                ) { Text("Pick video (Gallery)") }
-            }
+            // ---- Source picker ----
+            OutlinedButton(
+                onClick = { openDocumentLauncher.launch(arrayOf("video/*")) },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Pick video") }
 
             if (selectedUri != null) {
                 Text(
