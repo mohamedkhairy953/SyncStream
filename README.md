@@ -67,7 +67,9 @@ plugins, and the dependency direction is acyclic (enforced by the module graph).
 Run the app on two or more devices on the same network: pick **Master** on one — it becomes
 discoverable immediately (advertising over mDNS and accepting connections), before any video is
 chosen — then pick **Client** on the others to discover it and enter the PIN. On the master, pick a
-video at any point to start synchronized playback.
+video and tap **Start streaming** to enter the full-screen player, which embeds transport controls
+(play/pause, seek, ±10 s, loop), the session PIN, connected-client count, a select-another-video
+button, and a stop-hosting button. Clients begin synchronized playback as soon as the master plays.
 > mDNS discovery does not work on most emulators — use the manual host:port entry on the discovery
 > screen, or test on physical devices.
 

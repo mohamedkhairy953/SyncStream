@@ -524,6 +524,7 @@ class MasterViewModel(app: Application) : AndroidViewModel(app) {
     val thermalWarning: StateFlow<Boolean>
     val notificationsDenied: StateFlow<Boolean>
     val selectedUri: StateFlow<Uri?>
+    val loop: StateFlow<Boolean>
 
     fun bind()
     fun unbind()
@@ -538,16 +539,24 @@ class MasterViewModel(app: Application) : AndroidViewModel(app) {
 ### `MasterScreen`
 ```kotlin
 @Composable
-fun MasterScreen(
-    onExit: () -> Unit,
-    viewModel: MasterViewModel = viewModel(),
-)
+fun MasterScreen(viewModel: MasterViewModel, onStartStreaming: () -> Unit, onExit: () -> Unit)
 ```
 Behavior: shows PIN, session label, connected-client list, local preview
 (`SurfaceViewRenderer` initialized once with the shared `EglBase.eglBaseContext`; sink added
 via `videoSource.addPreviewSink`; `DisposableEffect` removes the sink THEN releases the
 renderer). PRIMARY picker = `OpenDocument(arrayOf("video/*"))`; secondary =
-`PickVisualMedia(VideoOnly)`. Transport controls, loop toggle, thermal chip, notification banner.
+`PickVisualMedia(VideoOnly)`. "Start streaming" button invokes `onStartStreaming` to navigate
+to `MasterPlayerScreen`. Thermal chip, notification banner.
+
+### `MasterPlayerScreen`
+```kotlin
+@Composable
+fun MasterPlayerScreen(viewModel: MasterViewModel, onBack: () -> Unit, onStopHosting: () -> Unit)
+```
+Behavior: full-screen player shown after the master taps "Start streaming". Embeds transport
+controls (play/pause, seek bar, −10 s / +10 s), loop toggle, PIN display, connected-client
+count, select-another-video picker, and a stop-hosting button that invokes `onStopHosting`.
+`onBack` navigates back to `MasterScreen` without stopping the stream.
 
 ## Package `com.syncstream.ui.client`
 

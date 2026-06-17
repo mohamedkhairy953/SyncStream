@@ -4,20 +4,26 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.compose.navigation
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.syncstream.ui.RolePickerScreen
 import com.syncstream.ui.client.ClientScreen
 import com.syncstream.ui.client.DiscoveryScreen
+import com.syncstream.ui.master.MasterPlayerScreen
 import com.syncstream.ui.master.MasterScreen
+import com.syncstream.ui.master.MasterViewModel
 import com.syncstream.ui.theme.SyncStreamTheme
 
 /**
@@ -26,7 +32,9 @@ import com.syncstream.ui.theme.SyncStreamTheme
  *
  * Routes:
  *   "rolePicker"            -> [RolePickerScreen]
- *   "master"                -> [MasterScreen]
+ *   "masterGraph"           -> nested graph
+ *     "master"              -> [MasterScreen]
+ *     "masterPlayer"        -> [MasterPlayerScreen]  (edge-to-edge, no inset padding)
  *   "discovery"             -> [DiscoveryScreen]
  *   "client/{host}/{port}"  -> [ClientScreen]
  */
@@ -50,30 +58,49 @@ private fun SyncStreamNavHost() {
         NavHost(
             navController = navController,
             startDestination = "rolePicker",
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding),
+            modifier = Modifier.fillMaxSize(),
         ) {
             composable("rolePicker") {
-                RolePickerScreen(
-                    onPickMaster = { navController.navigate("master") },
-                    onPickClient = { navController.navigate("discovery") },
-                )
+                Box(modifier = Modifier.padding(innerPadding)) {
+                    RolePickerScreen(
+                        onPickMaster = { navController.navigate("master") },
+                        onPickClient = { navController.navigate("discovery") },
+                    )
+                }
             }
 
-            composable("master") {
-                MasterScreen(
-                    onExit = { navController.popBackStack() },
-                )
+            navigation(startDestination = "master", route = "masterGraph") {
+                composable("master") {
+                    val parent = remember(it) { navController.getBackStackEntry("masterGraph") }
+                    val vm: MasterViewModel = viewModel(parent)
+                    Box(modifier = Modifier.padding(innerPadding)) {
+                        MasterScreen(
+                            viewModel = vm,
+                            onStartStreaming = { navController.navigate("masterPlayer") },
+                            onExit = { vm.stopStreaming(); navController.popBackStack("rolePicker", false) },
+                        )
+                    }
+                }
+                composable("masterPlayer") {
+                    val parent = remember(it) { navController.getBackStackEntry("masterGraph") }
+                    val vm: MasterViewModel = viewModel(parent)
+                    MasterPlayerScreen(
+                        viewModel = vm,
+                        onBack = { navController.popBackStack() },
+                        onStopHosting = { vm.stopStreaming(); navController.popBackStack("rolePicker", false) },
+                    )
+                }
             }
 
             composable("discovery") {
-                DiscoveryScreen(
-                    onConnect = { host, port ->
-                        navController.navigate("client/$host/$port")
-                    },
-                    onBack = { navController.popBackStack() },
-                )
+                Box(modifier = Modifier.padding(innerPadding)) {
+                    DiscoveryScreen(
+                        onConnect = { host, port ->
+                            navController.navigate("client/$host/$port")
+                        },
+                        onBack = { navController.popBackStack() },
+                    )
+                }
             }
 
             composable(
@@ -85,11 +112,13 @@ private fun SyncStreamNavHost() {
             ) { backStackEntry ->
                 val host = backStackEntry.arguments?.getString("host").orEmpty()
                 val port = backStackEntry.arguments?.getInt("port") ?: 0
-                ClientScreen(
-                    host = host,
-                    port = port,
-                    onExit = { navController.popBackStack("discovery", inclusive = false) },
-                )
+                Box(modifier = Modifier.padding(innerPadding)) {
+                    ClientScreen(
+                        host = host,
+                        port = port,
+                        onExit = { navController.popBackStack("discovery", inclusive = false) },
+                    )
+                }
             }
         }
     }
