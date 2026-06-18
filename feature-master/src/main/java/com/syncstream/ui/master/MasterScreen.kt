@@ -74,6 +74,7 @@ fun MasterScreen(
     val sessionLabel by viewModel.sessionLabel.collectAsStateWithLifecycle()
     val clients by viewModel.clients.collectAsStateWithLifecycle()
     val advertise by viewModel.advertise.collectAsStateWithLifecycle()
+    val endpoint by viewModel.endpoint.collectAsStateWithLifecycle()
     val thermalWarning by viewModel.thermalWarning.collectAsStateWithLifecycle()
     val notificationsDenied by viewModel.notificationsDenied.collectAsStateWithLifecycle()
     val selectedUri by viewModel.selectedUri.collectAsStateWithLifecycle()
@@ -121,7 +122,7 @@ fun MasterScreen(
 
             if (thermalWarning) ThermalChip()
 
-            SessionHeader(pin = pin, sessionLabel = sessionLabel, advertise = advertise)
+            SessionHeader(pin = pin, sessionLabel = sessionLabel, advertise = advertise, endpoint = endpoint)
 
             PreviewBox(viewModel = viewModel, active = streaming)
 
@@ -175,7 +176,7 @@ fun MasterScreen(
 }
 
 @Composable
-private fun SessionHeader(pin: String, sessionLabel: String, advertise: AdvertiseState) {
+private fun SessionHeader(pin: String, sessionLabel: String, advertise: AdvertiseState, endpoint: String?) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.fillMaxWidth().padding(16.dp)) {
             Text("PIN", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -199,6 +200,15 @@ private fun SessionHeader(pin: String, sessionLabel: String, advertise: Advertis
                     else -> MaterialTheme.colorScheme.onSurfaceVariant
                 },
             )
+            endpoint?.let {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Manual connect: $it",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }

@@ -39,6 +39,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import java.net.Inet4Address
+import java.net.NetworkInterface
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -113,6 +115,10 @@ class MasterStreamingService : LifecycleService() {
 
     private val _advertise = MutableStateFlow<AdvertiseState>(AdvertiseState.Idle)
     val advertise: StateFlow<AdvertiseState> = _advertise.asStateFlow()
+
+    /** "ip:port" of the signaling server for manual connect, or null while not hosting. */
+    private val _endpoint = MutableStateFlow<String?>(null)
+    val endpoint: StateFlow<String?> = _endpoint.asStateFlow()
 
     private val _thermalWarning = MutableStateFlow(false)
     val thermalWarning: StateFlow<Boolean> = _thermalWarning.asStateFlow()
@@ -238,6 +244,7 @@ class MasterStreamingService : LifecycleService() {
         )
         signalingServer = server
         val boundPort = server.start(SIGNALING_PORT)
+        _endpoint.value = localEndpoint(boundPort)
 
         val nsd = NsdAdvertiser(applicationContext)
         advertiser = nsd
@@ -341,6 +348,7 @@ class MasterStreamingService : LifecycleService() {
         masterClocks.clear()
 
         _advertise.value = AdvertiseState.Idle
+        _endpoint.value = null
         _thermalWarning.value = false
 
         // Clear the session identity set in startStreaming(). MasterScreen derives its live/
@@ -489,6 +497,23 @@ class MasterStreamingService : LifecycleService() {
         wakeLock = null
         wifiLock?.let { if (it.isHeld) it.release() }
         wifiLock = null
+    }
+
+    /**
+     * "ip:port" for the manual-connect fallback. Picks the first non-loopback site-local IPv4 —
+     * the SoftAP (`ap0`, e.g. 10.x) when this device hosts the hotspot, or the Wi-Fi (`wlan0`,
+     * e.g. 192.168.x) when it joined one. Falls back to "port N" if no address can be read.
+     */
+    private fun localEndpoint(port: Int): String {
+        val ip = runCatching {
+            NetworkInterface.getNetworkInterfaces().asSequence()
+                .filter { runCatching { it.isUp && !it.isLoopback }.getOrDefault(false) }
+                .flatMap { it.inetAddresses.asSequence() }
+                .filterIsInstance<Inet4Address>()
+                .firstOrNull { it.isSiteLocalAddress }
+                ?.hostAddress
+        }.getOrNull()
+        return if (ip != null) "$ip:$port" else "port $port"
     }
 
     // ---- Notification ----

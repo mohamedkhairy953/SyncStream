@@ -31,6 +31,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -44,6 +45,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.syncstream.discovery.DiscoveredService
 import com.syncstream.discovery.DiscoveryState
+import kotlinx.coroutines.delay
 
 /**
  * Lists masters discovered via mDNS and offers a debug manual host:port entry as a fallback
@@ -53,6 +55,9 @@ import com.syncstream.discovery.DiscoveryState
  * The PIN is passed forward through a process-local holder ([PendingConnection]) rather than the
  * navigation route, so it never lands in a back-stack argument or log.
  */
+/** How often to re-issue the mDNS browse while no master has been found yet. */
+private const val RESCAN_WHILE_EMPTY_MS = 6_000L
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DiscoveryScreen(
@@ -66,6 +71,19 @@ fun DiscoveryScreen(
     DisposableEffect(viewModel) {
         viewModel.startDiscovery()
         onDispose { viewModel.stopDiscovery() }
+    }
+
+    // Auto-rescan while nothing has been found. mDNS over a phone SoftAP often drops the first
+    // announcement/resolve; re-issuing the browse every few seconds recovers it. Skipped once a
+    // master appears, so there is no list flicker for the working case.
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(RESCAN_WHILE_EMPTY_MS)
+            if (viewModel.discovered.value.isEmpty()) {
+                viewModel.stopDiscovery()
+                viewModel.startDiscovery()
+            }
+        }
     }
 
     // The (host, port) awaiting a PIN before we navigate.

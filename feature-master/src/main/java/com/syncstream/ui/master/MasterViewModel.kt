@@ -50,6 +50,9 @@ class MasterViewModel(app: Application) : AndroidViewModel(app) {
     private val _advertise = MutableStateFlow<AdvertiseState>(AdvertiseState.Idle)
     val advertise: StateFlow<AdvertiseState> = _advertise.asStateFlow()
 
+    private val _endpoint = MutableStateFlow<String?>(null)
+    val endpoint: StateFlow<String?> = _endpoint.asStateFlow()
+
     private val _thermalWarning = MutableStateFlow(false)
     val thermalWarning: StateFlow<Boolean> = _thermalWarning.asStateFlow()
 
@@ -147,6 +150,7 @@ class MasterViewModel(app: Application) : AndroidViewModel(app) {
         collectors += viewModelScope.launch { svc.clients.collect { _clients.value = it } }
         collectors += viewModelScope.launch { svc.playback.collect { _playback.value = it } }
         collectors += viewModelScope.launch { svc.advertise.collect { _advertise.value = it } }
+        collectors += viewModelScope.launch { svc.endpoint.collect { _endpoint.value = it } }
         collectors += viewModelScope.launch { svc.thermalWarning.collect { _thermalWarning.value = it } }
         collectors += viewModelScope.launch { svc.notificationsDenied.collect { _notificationsDenied.value = it } }
     }

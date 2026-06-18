@@ -22,6 +22,9 @@ private const val TAG = "NsdDiscoverer"
 private const val SERVICE_TYPE = "_syncstream._tcp"
 private const val TXT_KEY_LABEL = "label"
 
+/** Max resolve attempts per found service before giving up (flaky resolves over SoftAP). */
+private const val MAX_RESOLVE_ATTEMPTS = 6
+
 /**
  * Discovered master endpoint after a successful NSD resolve.
  */
@@ -192,14 +195,24 @@ class NsdDiscoverer(private val context: Context) {
             onSuccess = { resolved -> handleResolved(resolved) },
             onFailure = { err ->
                 if (err is ResolveException) {
-                    if (err.errorCode == NsdManager.FAILURE_ALREADY_ACTIVE) {
-                        Log.d(TAG, "FAILURE_ALREADY_ACTIVE for '${err.info.serviceName}', re-enqueuing (attempt ${retryCount + 1})")
+                    // Retry EVERY failure with backoff, not just FAILURE_ALREADY_ACTIVE. Android's
+                    // resolveService is flaky over a phone SoftAP/hotspot — it commonly fails with
+                    // FAILURE_INTERNAL_ERROR/timeouts on the first try even though the service is
+                    // there. Without retrying, onServiceFound fires but the master never makes it
+                    // into the list ("0 found"). Capped so a genuinely-gone service stops retrying.
+                    val busy = err.errorCode == NsdManager.FAILURE_ALREADY_ACTIVE
+                    if (retryCount + 1 < MAX_RESOLVE_ATTEMPTS) {
+                        Log.d(
+                            TAG,
+                            "Resolve ${if (busy) "busy" else "failed (errorCode=${err.errorCode})"} for " +
+                                "'${err.info.serviceName}', re-enqueuing (attempt ${retryCount + 1})",
+                        )
                         resolveQueue.trySend(Pair(err.info, retryCount + 1))
                     } else {
                         Log.w(
                             TAG,
-                            "Resolve failed for '${err.info.serviceName}' errorCode=${err.errorCode}. " +
-                                "If this is consistent, check router AP isolation settings.",
+                            "Gave up resolving '${err.info.serviceName}' after $MAX_RESOLVE_ATTEMPTS " +
+                                "attempts (last errorCode=${err.errorCode}). Check AP isolation.",
                         )
                     }
                 }

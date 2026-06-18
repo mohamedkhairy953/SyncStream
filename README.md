@@ -76,8 +76,10 @@ reappear on tap (a tap while hidden only reveals them; a tap while shown toggles
 > (no STUN/TURN), so streaming never consumes mobile data. The shared `PeerConnectionFactory` sets
 > `disableNetworkMonitor` so libwebrtc enumerates the SoftAP (`ap0`) interface and gathers candidates
 > on it; without this the master gathers none over its own hotspot and no video flows.
-> mDNS discovery does not work on most emulators — use the manual host:port entry on the discovery
-> screen, or test on physical devices.
+> Discovery auto-rescans while the client's list is empty and retries flaky NSD resolves, which
+> mDNS over a phone hotspot often needs. If it's still slow or unavailable (most emulators), use the
+> manual host:port entry on the client's discovery screen — the master shows its own **IP:port**
+> under the PIN for exactly this fallback.
 
 ## Repository layout
 

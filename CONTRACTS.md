@@ -464,6 +464,7 @@ class MasterStreamingService : LifecycleService() {
     val clients: StateFlow<List<ClientHandle>>    // delegates ClientRegistry.clients
     val playback: StateFlow<PlaybackInfo>         // delegates MasterPlayerController.playback
     val advertise: StateFlow<AdvertiseState>
+    val endpoint: StateFlow<String?>              // "ip:port" for manual connect, null when not hosting
     val thermalWarning: StateFlow<Boolean>        // true after SEVERE downscale
     val notificationsDenied: StateFlow<Boolean>
 
@@ -521,6 +522,7 @@ class MasterViewModel(app: Application) : AndroidViewModel(app) {
     val clients: StateFlow<List<ClientHandle>>
     val playback: StateFlow<PlaybackInfo>
     val advertise: StateFlow<AdvertiseState>
+    val endpoint: StateFlow<String?>
     val thermalWarning: StateFlow<Boolean>
     val notificationsDenied: StateFlow<Boolean>
     val selectedUri: StateFlow<Uri?>
