@@ -5,6 +5,9 @@ import android.view.ViewGroup
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -46,6 +49,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -74,9 +78,11 @@ import org.webrtc.SurfaceViewRenderer
  * as [MasterScreen] (scoped to the masterGraph back-stack entry) so the streaming session keeps
  * running while this screen is shown.
  *
- * Interaction model:
- * - Tapping the video toggles play/pause; when paused, a centred play glyph is shown.
- * - Controls live in a persistent bottom panel: row 1 is the seek bar, row 2 is options + info.
+ * Interaction model (standard video-player behaviour):
+ * - Controls (top bar + bottom panel + centre glyph) auto-hide after a few seconds of no
+ *   interaction while playing, and stay visible while paused.
+ * - Tapping while controls are hidden reveals them (without toggling playback); tapping while
+ *   they are shown toggles play/pause. Any interaction restarts the auto-hide timer.
  * - Immersive display (system bars hidden, screen kept awake); hardware-back returns to setup
  *   without stopping the session.
  */
@@ -135,13 +141,30 @@ fun MasterPlayerScreen(
         }
     }
 
+    // ---- Auto-hiding controls ----
+    // controlsVisible drives every overlay's visibility. interactionNonce is bumped on each user
+    // action to restart the auto-hide timer below (keyed on it). Controls stay up while paused.
+    var controlsVisible by remember { mutableStateOf(true) }
+    var interactionNonce by remember { mutableIntStateOf(0) }
+    val keepControlsAlive: () -> Unit = { interactionNonce++ }
+    LaunchedEffect(controlsVisible, playback.playing, interactionNonce) {
+        if (controlsVisible && playback.playing) {
+            delay(3500)
+            controlsVisible = false
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
-            // Tap the video to toggle play/pause.
+            // Hidden controls: tap reveals them. Shown controls: tap toggles play/pause.
+            // Either way, restart the auto-hide timer.
             .pointerInput(Unit) {
-                detectTapGestures { togglePlayPause() }
+                detectTapGestures {
+                    if (controlsVisible) togglePlayPause() else controlsVisible = true
+                    interactionNonce++
+                }
             },
     ) {
         // ---- Video layer ----
@@ -208,31 +231,43 @@ fun MasterPlayerScreen(
         }
 
         // ---- Top scrim + bar ----
-        Box(
-            Modifier
-                .align(Alignment.TopCenter)
-                .fillMaxWidth()
-                .height(120.dp)
-                .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.7f), Color.Transparent))),
-        )
-        TopBar(
-            title = selectedUri?.lastPathSegment ?: "No video selected",
-            onBack = onBack,
-            onStopHosting = onStopHosting,
-            modifier = Modifier.align(Alignment.TopStart),
-        )
+        AnimatedVisibility(
+            visible = controlsVisible,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.align(Alignment.TopCenter),
+        ) {
+            Box(Modifier.fillMaxWidth()) {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(120.dp)
+                        .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.7f), Color.Transparent))),
+                )
+                TopBar(
+                    title = selectedUri?.lastPathSegment ?: "No video selected",
+                    onBack = onBack,
+                    onStopHosting = onStopHosting,
+                    modifier = Modifier.align(Alignment.TopStart),
+                )
+            }
+        }
 
-        // ---- Centre play glyph (only while paused) ----
-        if (!playback.playing) {
+        // ---- Centre play glyph (only while paused and controls shown) ----
+        AnimatedVisibility(
+            visible = controlsVisible && !playback.playing,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.align(Alignment.Center),
+        ) {
             Box(
                 modifier = Modifier
-                    .align(Alignment.Center)
                     .size(76.dp)
                     .background(Color.Black.copy(alpha = 0.45f), CircleShape)
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
-                    ) { togglePlayPause() },
+                    ) { keepControlsAlive(); togglePlayPause() },
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
@@ -245,28 +280,38 @@ fun MasterPlayerScreen(
         }
 
         // ---- Bottom scrim + control panel ----
-        Box(
-            Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .height(170.dp)
-                .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.85f)))),
-        )
-        BottomPanel(
-            positionMs = playback.positionMs,
-            durationMs = playback.durationMs,
-            playing = playback.playing,
-            loop = loop,
-            pin = pin,
-            clientCount = clients.size,
-            thermalWarning = thermalWarning,
-            onSeek = viewModel::seekTo,
-            onRewind = { viewModel.seekTo((playback.positionMs - 10_000L).coerceAtLeast(0L)) },
-            onForward = { viewModel.seekTo(playback.positionMs + 10_000L) },
-            onToggleLoop = { viewModel.setLoop(!loop) },
-            onSelectVideo = { openDocumentLauncher.launch(arrayOf("video/*")) },
+        AnimatedVisibility(
+            visible = controlsVisible,
+            enter = fadeIn(),
+            exit = fadeOut(),
             modifier = Modifier.align(Alignment.BottomCenter),
-        )
+        ) {
+            Box(Modifier.fillMaxWidth()) {
+                Box(
+                    Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .height(170.dp)
+                        .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.85f)))),
+                )
+                BottomPanel(
+                    positionMs = playback.positionMs,
+                    durationMs = playback.durationMs,
+                    playing = playback.playing,
+                    loop = loop,
+                    pin = pin,
+                    clientCount = clients.size,
+                    thermalWarning = thermalWarning,
+                    onSeek = { keepControlsAlive(); viewModel.seekTo(it) },
+                    onRewind = { keepControlsAlive(); viewModel.seekTo((playback.positionMs - 10_000L).coerceAtLeast(0L)) },
+                    onForward = { keepControlsAlive(); viewModel.seekTo(playback.positionMs + 10_000L) },
+                    onToggleLoop = { keepControlsAlive(); viewModel.setLoop(!loop) },
+                    onSelectVideo = { keepControlsAlive(); openDocumentLauncher.launch(arrayOf("video/*")) },
+                    onInteract = keepControlsAlive,
+                    modifier = Modifier.align(Alignment.BottomCenter),
+                )
+            }
+        }
     }
 }
 
@@ -321,6 +366,7 @@ private fun BottomPanel(
     onForward: () -> Unit,
     onToggleLoop: () -> Unit,
     onSelectVideo: () -> Unit,
+    onInteract: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val duration = durationMs.coerceAtLeast(0L)
@@ -365,6 +411,7 @@ private fun BottomPanel(
                 onValueChange = {
                     scrubbing = true
                     scrubValue = it
+                    onInteract()
                 },
                 onValueChangeFinished = {
                     scrubbing = false

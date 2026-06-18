@@ -69,7 +69,8 @@ discoverable immediately (advertising over mDNS and accepting connections), befo
 chosen — then pick **Client** on the others to discover it and enter the PIN. On the master, pick a
 video and tap **Start streaming** to enter the full-screen player, which embeds transport controls
 (play/pause, seek, ±10 s, loop), the session PIN, connected-client count, a select-another-video
-button, and a stop-hosting button. Clients begin synchronized playback as soon as the master plays.
+button, and a stop-hosting button. The controls auto-hide after a few seconds during playback and
+reappear on tap (a tap while hidden only reveals them; a tap while shown toggles play/pause). Clients begin synchronized playback as soon as the master plays.
 > Works over any shared LAN — including one phone's own **Wi-Fi hotspot** with no internet (the
 > master can host the hotspot itself). All media stays on the local network via host ICE candidates
 > (no STUN/TURN), so streaming never consumes mobile data. The shared `PeerConnectionFactory` sets
