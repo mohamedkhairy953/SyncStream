@@ -1,7 +1,10 @@
 package com.syncstream.ui.client
 
 import android.app.Application
+import android.content.Context
+import android.net.wifi.WifiManager
 import android.os.Build
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.syncstream.appContainer
@@ -41,6 +44,18 @@ import org.webrtc.VideoTrack
 class ClientViewModel(app: Application) : AndroidViewModel(app) {
 
     private val container = app.appContainer
+
+    private val wifiManager = app.applicationContext
+        .getSystemService(Context.WIFI_SERVICE) as WifiManager
+
+    /**
+     * Held for the whole connected session (not just discovery). WebRTC obfuscates host ICE
+     * candidates as `.local` mDNS names; resolving the master's candidate requires receiving
+     * multicast mDNS responses, which Android only delivers while a MulticastLock is held. The
+     * NsdDiscoverer lock is released the moment we connect, so without this the ICE handshake
+     * stalls and no media ever flows — most visibly on a hotspot with no internet.
+     */
+    private var multicastLock: WifiManager.MulticastLock? = null
 
     /** Shared EGL context for the client's `SurfaceViewRenderer`. */
     val eglContext: EglBase.Context get() = container.eglBase.eglBaseContext
@@ -93,6 +108,7 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun connect(host: String, port: Int, pin: String, previousSessionId: String? = null) {
         teardownRuntime()
+        acquireMulticastLock()
 
         val webRtc = WebRtcCore(container.peerConnectionFactory, container.eglBase)
         core = webRtc
@@ -163,6 +179,7 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
         }
 
         override fun onRemoteIce(sdpMid: String?, sdpMLineIndex: Int, candidate: String) {
+            Log.i(TAG, "remote ICE candidate: $candidate")
             peers.onRemoteIce(sdpMid, sdpMLineIndex, candidate)
         }
 
@@ -182,6 +199,7 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
         receiver: AudioReceiver,
     ) = object : ClientPeerManager.Callbacks {
         override suspend fun onLocalIce(c: IceCandidate) {
+            Log.i(TAG, "local ICE candidate: ${c.sdp}")
             signaling?.sendIce(c.sdpMid, c.sdpMLineIndex, c.sdp)
         }
 
@@ -206,6 +224,7 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
         }
 
         override fun onPeerStateChanged(state: PeerState) {
+            Log.i(TAG, "peer state -> $state")
             _peerState.value = state
         }
     }
@@ -261,6 +280,24 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
         signaling = null
         core = null
         _remoteVideoTrack.value = null
+        releaseMulticastLock()
+    }
+
+    private fun acquireMulticastLock() {
+        if (multicastLock?.isHeld == true) return
+        multicastLock = wifiManager.createMulticastLock("SyncStreamClientSession").also {
+            it.setReferenceCounted(false)
+            it.acquire()
+            Log.d(TAG, "Session MulticastLock acquired")
+        }
+    }
+
+    private fun releaseMulticastLock() {
+        multicastLock?.takeIf { it.isHeld }?.let {
+            it.release()
+            Log.d(TAG, "Session MulticastLock released")
+        }
+        multicastLock = null
     }
 
     override fun onCleared() {
@@ -273,6 +310,7 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
     private fun deviceName(): String = "${Build.MANUFACTURER} ${Build.MODEL}".trim()
 
     private companion object {
+        const val TAG = "ClientViewModel"
         const val STATS_POLL_MS = 2_000L
     }
 }

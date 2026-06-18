@@ -65,7 +65,15 @@ class AppContainer(private val appContext: Context) {
             /* enableH264HighProfile = */ true,
         )
         val decoderFactory = DefaultVideoDecoderFactory(eglContext)
+        // disableNetworkMonitor: libwebrtc's Android NetworkMonitor enumerates interfaces from
+        // ConnectivityManager, which omits the SoftAP (`ap0`) interface when a device hosts a
+        // hotspot with no internet (it is not a "default"/validated network). The master then
+        // gathers ZERO host ICE candidates and the client's ICE never connects (no video).
+        // Disabling it makes libwebrtc fall back to native getifaddrs enumeration, which sees
+        // every interface — including ap0 — so host candidates are gathered on the hotspot subnet.
+        val options = PeerConnectionFactory.Options().apply { disableNetworkMonitor = true }
         PeerConnectionFactory.builder()
+            .setOptions(options)
             .setVideoEncoderFactory(encoderFactory)
             .setVideoDecoderFactory(decoderFactory)
             .setAudioDeviceModule(audioDeviceModule)

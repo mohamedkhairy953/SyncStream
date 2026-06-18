@@ -70,6 +70,11 @@ chosen — then pick **Client** on the others to discover it and enter the PIN. 
 video and tap **Start streaming** to enter the full-screen player, which embeds transport controls
 (play/pause, seek, ±10 s, loop), the session PIN, connected-client count, a select-another-video
 button, and a stop-hosting button. Clients begin synchronized playback as soon as the master plays.
+> Works over any shared LAN — including one phone's own **Wi-Fi hotspot** with no internet (the
+> master can host the hotspot itself). All media stays on the local network via host ICE candidates
+> (no STUN/TURN), so streaming never consumes mobile data. The shared `PeerConnectionFactory` sets
+> `disableNetworkMonitor` so libwebrtc enumerates the SoftAP (`ap0`) interface and gathers candidates
+> on it; without this the master gathers none over its own hotspot and no video flows.
 > mDNS discovery does not work on most emulators — use the manual host:port entry on the discovery
 > screen, or test on physical devices.
 
