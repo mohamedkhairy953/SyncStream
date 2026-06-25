@@ -31,19 +31,23 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.outlined.People
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -86,6 +90,7 @@ import org.webrtc.SurfaceViewRenderer
  * - Immersive display (system bars hidden, screen kept awake); hardware-back returns to setup
  *   without stopping the session.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MasterPlayerScreen(
     viewModel: MasterViewModel,
@@ -99,6 +104,11 @@ fun MasterPlayerScreen(
     val selectedUri by viewModel.selectedUri.collectAsStateWithLifecycle()
     val thermalWarning by viewModel.thermalWarning.collectAsStateWithLifecycle()
     val loop by viewModel.loop.collectAsStateWithLifecycle()
+    val endpoint by viewModel.endpoint.collectAsStateWithLifecycle()
+    val recentVideos by viewModel.recentVideos.collectAsStateWithLifecycle()
+
+    var showQr by remember { mutableStateOf(false) }
+    var showRecents by remember { mutableStateOf(false) }
 
     // Self-heal: if the service somehow isn't bound, bind it (idempotent). Reading the bound state
     // below makes eglContext/videoSource (plain getters) refresh once the service connects.
@@ -247,6 +257,7 @@ fun MasterPlayerScreen(
                 TopBar(
                     title = selectedUri?.lastPathSegment ?: "No video selected",
                     onBack = onBack,
+                    onShowQr = { keepControlsAlive(); showQr = true },
                     onStopHosting = onStopHosting,
                     modifier = Modifier.align(Alignment.TopStart),
                 )
@@ -306,12 +317,25 @@ fun MasterPlayerScreen(
                     onRewind = { keepControlsAlive(); viewModel.seekTo((playback.positionMs - 10_000L).coerceAtLeast(0L)) },
                     onForward = { keepControlsAlive(); viewModel.seekTo(playback.positionMs + 10_000L) },
                     onToggleLoop = { keepControlsAlive(); viewModel.setLoop(!loop) },
-                    onSelectVideo = { keepControlsAlive(); openDocumentLauncher.launch(arrayOf("video/*")) },
+                    onSelectVideo = { keepControlsAlive(); showRecents = true },
                     onInteract = keepControlsAlive,
                     modifier = Modifier.align(Alignment.BottomCenter),
                 )
             }
         }
+    }
+
+    if (showQr) {
+        QrJoinSheet(endpoint = endpoint, pin = pin, onDismiss = { showQr = false })
+    }
+
+    if (showRecents) {
+        RecentVideosBottomSheet(
+            recents = recentVideos,
+            onPick = { showRecents = false; viewModel.playRecent(it) },
+            onBrowse = { showRecents = false; openDocumentLauncher.launch(arrayOf("video/*")) },
+            onDismiss = { showRecents = false },
+        )
     }
 }
 
@@ -319,6 +343,7 @@ fun MasterPlayerScreen(
 private fun TopBar(
     title: String,
     onBack: () -> Unit,
+    onShowQr: () -> Unit,
     onStopHosting: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -345,8 +370,74 @@ private fun TopBar(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f).padding(start = 4.dp),
         )
+        IconButton(onClick = onShowQr) {
+            Icon(
+                Icons.Filled.QrCode2,
+                contentDescription = "Show join QR code",
+                tint = Color.White,
+                modifier = Modifier.size(26.dp),
+            )
+        }
         TextButton(onClick = onStopHosting) {
             Text("Stop hosting", color = Color(0xFFFF6B6B), fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RecentVideosBottomSheet(
+    recents: List<RecentVideo>,
+    onPick: (RecentVideo) -> Unit,
+    onBrowse: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState()
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp)
+                .padding(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                "Play a video",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(vertical = 8.dp),
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onBrowse)
+                    .padding(vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Filled.VideoLibrary, contentDescription = null)
+                Spacer(Modifier.width(12.dp))
+                Text("Pick from device", style = MaterialTheme.typography.bodyLarge)
+            }
+            if (recents.isNotEmpty()) {
+                HorizontalDivider()
+                Text(
+                    "Recent",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                recents.forEach { recent ->
+                    Text(
+                        recent.name,
+                        style = MaterialTheme.typography.bodyLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onPick(recent) }
+                            .padding(vertical = 14.dp),
+                    )
+                }
+            }
         }
     }
 }

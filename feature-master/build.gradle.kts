@@ -20,4 +20,5 @@ dependencies {
     implementation(libs.androidx.lifecycle.service)   // MasterStreamingService : LifecycleService
     implementation(libs.androidx.activity.compose)    // rememberLauncherForActivityResult
     implementation(libs.androidx.compose.material.icons.extended)
+    implementation(libs.zxing.core)                   // generate the join QR bitmap
 }

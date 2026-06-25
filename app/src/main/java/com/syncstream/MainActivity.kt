@@ -20,7 +20,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.syncstream.ui.RolePickerScreen
 import com.syncstream.ui.client.ClientScreen
-import com.syncstream.ui.client.DiscoveryScreen
+import com.syncstream.ui.client.QrScanScreen
 import com.syncstream.ui.master.MasterPlayerScreen
 import com.syncstream.ui.master.MasterScreen
 import com.syncstream.ui.master.MasterViewModel
@@ -35,7 +35,7 @@ import com.syncstream.ui.theme.SyncStreamTheme
  *   "masterGraph"           -> nested graph
  *     "master"              -> [MasterScreen]
  *     "masterPlayer"        -> [MasterPlayerScreen]  (edge-to-edge, no inset padding)
- *   "discovery"             -> [DiscoveryScreen]
+ *   "scan"                  -> [QrScanScreen]
  *   "client/{host}/{port}"  -> [ClientScreen]
  */
 class MainActivity : ComponentActivity() {
@@ -64,7 +64,7 @@ private fun SyncStreamNavHost() {
                 Box(modifier = Modifier.padding(innerPadding)) {
                     RolePickerScreen(
                         onPickMaster = { navController.navigate("master") },
-                        onPickClient = { navController.navigate("discovery") },
+                        onPickClient = { navController.navigate("scan") },
                     )
                 }
             }
@@ -92,10 +92,10 @@ private fun SyncStreamNavHost() {
                 }
             }
 
-            composable("discovery") {
+            composable("scan") {
                 Box(modifier = Modifier.padding(innerPadding)) {
-                    DiscoveryScreen(
-                        onConnect = { host, port ->
+                    QrScanScreen(
+                        onScanned = { host, port ->
                             navController.navigate("client/$host/$port")
                         },
                         onBack = { navController.popBackStack() },
@@ -116,7 +116,7 @@ private fun SyncStreamNavHost() {
                     ClientScreen(
                         host = host,
                         port = port,
-                        onExit = { navController.popBackStack("discovery", inclusive = false) },
+                        onExit = { navController.popBackStack("scan", inclusive = false) },
                     )
                 }
             }

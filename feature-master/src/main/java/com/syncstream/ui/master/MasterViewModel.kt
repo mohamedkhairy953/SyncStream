@@ -8,6 +8,7 @@ import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.IBinder
+import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.syncstream.discovery.AdvertiseState
@@ -65,6 +66,13 @@ class MasterViewModel(app: Application) : AndroidViewModel(app) {
     private val _selectedUri = MutableStateFlow<Uri?>(null)
     val selectedUri: StateFlow<Uri?> = _selectedUri.asStateFlow()
 
+    /** Last 10 videos that were actually streamed (persisted); newest first. */
+    private val recentStore = RecentVideosStore(app)
+    val recentVideos: StateFlow<List<RecentVideo>> = recentStore.recent
+
+    /** Guards [maybeRecordRecent] so resuming after a pause doesn't re-record the same video. */
+    private var lastRecordedUri: Uri? = null
+
     /** Shared EGL context for the preview renderer; null until bound + streaming started. */
     val eglContext: EglBase.Context? get() = service?.eglContextProvider()?.eglBaseContext
 
@@ -117,6 +125,11 @@ class MasterViewModel(app: Application) : AndroidViewModel(app) {
         service?.setMediaUri(uri)
     }
 
+    /** Re-select a video from the recent-history list. */
+    fun playRecent(recent: RecentVideo) {
+        onMediaPicked(Uri.parse(recent.uri))
+    }
+
     fun startStreaming() {
         val svc = service ?: return
         svc.startStreaming()
@@ -148,11 +161,40 @@ class MasterViewModel(app: Application) : AndroidViewModel(app) {
         collectors += viewModelScope.launch { svc.pin.collect { _pin.value = it } }
         collectors += viewModelScope.launch { svc.sessionLabel.collect { _sessionLabel.value = it } }
         collectors += viewModelScope.launch { svc.clients.collect { _clients.value = it } }
-        collectors += viewModelScope.launch { svc.playback.collect { _playback.value = it } }
+        collectors += viewModelScope.launch {
+            svc.playback.collect {
+                _playback.value = it
+                maybeRecordRecent(it)
+            }
+        }
         collectors += viewModelScope.launch { svc.advertise.collect { _advertise.value = it } }
         collectors += viewModelScope.launch { svc.endpoint.collect { _endpoint.value = it } }
         collectors += viewModelScope.launch { svc.thermalWarning.collect { _thermalWarning.value = it } }
         collectors += viewModelScope.launch { svc.notificationsDenied.collect { _notificationsDenied.value = it } }
+    }
+
+    /**
+     * Records the current video into the recent-history list the first time playback starts for it
+     * ("streaming actually starts"). Guarded by [lastRecordedUri] so resume-after-pause does not
+     * re-record or re-order; a genuinely new selection promotes it to the front.
+     */
+    private fun maybeRecordRecent(playback: PlaybackInfo) {
+        if (!playback.playing) return
+        val uri = _selectedUri.value ?: return
+        if (uri == lastRecordedUri) return
+        lastRecordedUri = uri
+        recentStore.record(uri, displayName(uri))
+    }
+
+    /** Resolves a human-readable title for [uri], falling back to its last path segment. */
+    private fun displayName(uri: Uri): String {
+        val resolver = getApplication<Application>().contentResolver
+        val name = runCatching {
+            resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                if (c.moveToFirst()) c.getString(0) else null
+            }
+        }.getOrNull()
+        return name ?: uri.lastPathSegment ?: uri.toString()
     }
 
     private fun cancelCollectors() {

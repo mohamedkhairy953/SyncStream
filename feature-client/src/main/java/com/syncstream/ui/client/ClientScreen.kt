@@ -31,6 +31,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -65,9 +66,17 @@ fun ClientScreen(
 
     val eglContext = remember { viewModel.eglContext }
 
-    // Dial on first composition using the PIN handed over from DiscoveryScreen.
+    // Dial on first composition using the PIN handed over from QrScanScreen.
     LaunchedEffect(host, port) {
         viewModel.connect(host, port, PendingConnection.pin)
+    }
+
+    // Keep the screen awake (no dim) only while the master is actively playing. Pause / end / leave
+    // releases the flag so the device can dim normally.
+    val view = LocalView.current
+    DisposableEffect(playhead.playing) {
+        view.keepScreenOn = playhead.playing
+        onDispose { view.keepScreenOn = false }
     }
 
     Box(

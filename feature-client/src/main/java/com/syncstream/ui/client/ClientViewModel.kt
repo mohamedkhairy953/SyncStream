@@ -35,7 +35,9 @@ import org.webrtc.VideoTrack
 /**
  * Client-side composition root. Owns (no service) the [SignalingClient], a [ClientPeerManager]
  * fed by the shared [WebRtcCore] (EGL/factory from [com.syncstream.AppContainer]), a [ClockSync],
- * a client-side [SyncEngine] and an [AudioReceiver], plus the [NsdDiscoverer].
+ * a client-side [SyncEngine] and an [AudioReceiver], plus the [NsdDiscoverer]. The master is reached
+ * by scanning its join QR, picking it from the discovered list, or typing its code (see
+ * `QrScanScreen`) — the latter two matter for cameraless devices such as Android TV.
  *
  * The ViewModel holds NO raw signalling/WebRTC state in the UI sense — it exposes only the
  * derived [StateFlow]s the screens render. WebRTC objects are created/destroyed in [connect]/
@@ -60,7 +62,7 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
     /** Shared EGL context for the client's `SurfaceViewRenderer`. */
     val eglContext: EglBase.Context get() = container.eglBase.eglBaseContext
 
-    // ---- Discovery ----
+    // ---- Discovery (browse the LAN for masters; used by QrScanScreen's list) ----
     private val discoverer = NsdDiscoverer(app)
     val discovered: StateFlow<List<DiscoveredService>> get() = discoverer.services
     val discoveryState: StateFlow<DiscoveryState> get() = discoverer.state

@@ -15,6 +15,9 @@ ktor = "3.5.0"
 media3 = "1.10.1"
 webrtc = "144.7559.09"
 
+zxingCore = "3.5.3"
+zxingEmbedded = "4.3.0"
+
 [libraries]
 # AndroidX core / lifecycle
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -55,6 +58,10 @@ androidx-media3-session = { group = "androidx.media3", name = "media3-session", 
 
 # WebRTC (org.webrtc API surface, libwebrtc M144)
 webrtc-android = { group = "io.github.webrtc-sdk", name = "android", version.ref = "webrtc" }
+
+# QR — master generates (pure-Java core), client scans (camera view)
+zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxingCore" }
+zxing-android-embedded = { group = "com.journeyapps", name = "zxing-android-embedded", version.ref = "zxingEmbedded" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

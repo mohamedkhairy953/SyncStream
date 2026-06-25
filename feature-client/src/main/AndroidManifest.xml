@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- The client joins a master by scanning its QR code (host:port:pin). -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Camera is only used for QR scanning; the app still installs on camera-less devices. -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+
+</manifest>

@@ -21,8 +21,9 @@ MasterStreamingService  --composes-->  Ktor SignalingServer, WebRtcCore, MasterP
 MasterScreen/MasterViewModel
 
 Client side (no service): ClientViewModel composes SignalingClient, WebRtcCore (shared
-factory via AppContainer), ClientPeerManager, ClockSync, SyncEngine, AudioReceiver,
-NsdDiscoverer.
+factory via AppContainer), ClientPeerManager, ClockSync, SyncEngine, AudioReceiver, NsdDiscoverer.
+The client reaches a master three ways (QrScanScreen → JoinLink): scan the join QR, type the
+`host:port:pin` code, or pick from the discovered list. The latter two serve cameraless Android TV.
 ```
 
 Rules:
@@ -31,6 +32,25 @@ Rules:
 - UI observes via `StateFlow` exposed on the binder / ViewModel; never reaches into core objects.
 - Clock domain everywhere: `android.os.SystemClock.elapsedRealtime()`.
 - All WebSocket sends are `Mutex`-guarded. `offset = masterClock - clientClock`.
+
+---
+
+## Package `com.syncstream.core`
+
+### `JoinLink`
+```kotlin
+// Single source of truth for the master's join-QR payload. Master builds it from its endpoint +
+// PIN; client parses a scanned QR back into JoinInfo. parse() returns null for any non-SyncStream
+// QR, so the scanner ignores foreign codes. Format: syncstream://join?h=<host>&p=<port>&pin=<pin>
+data class JoinInfo(val host: String, val port: Int, val pin: String)
+
+object JoinLink {
+    fun build(host: String, port: Int, pin: String): String   // QR payload (URI)
+    fun parse(text: String): JoinInfo?                         // decode a scanned QR
+    fun buildCode(host: String, port: Int, pin: String): String  // "host:port:pin" (TV-typeable)
+    fun parseCode(text: String): JoinInfo?                     // accepts the URI OR "host:port:pin"
+}
+```
 
 ---
 
@@ -527,16 +547,21 @@ class MasterViewModel(app: Application) : AndroidViewModel(app) {
     val notificationsDenied: StateFlow<Boolean>
     val selectedUri: StateFlow<Uri?>
     val loop: StateFlow<Boolean>
+    val recentVideos: StateFlow<List<RecentVideo>>   // last 10 streamed videos, newest first
 
     fun bind()
     fun unbind()
     fun onMediaPicked(uri: Uri)          // takePersistableUriPermission + service.setMediaUri
+    fun playRecent(recent: RecentVideo)  // re-select a video from recentVideos
     fun startStreaming()
     fun stopStreaming()
     fun play(); fun pause(); fun seekTo(positionMs: Long)
     fun setLoop(enabled: Boolean)
 }
 ```
+`RecentVideo(uri: String, name: String)` lives in `com.syncstream.ui.master` (persisted by
+`RecentVideosStore` in SharedPreferences). A video is recorded the first time playback starts for
+it ("streaming actually starts"); re-streaming promotes it to the front, capped at 10.
 
 ### `MasterScreen`
 ```kotlin
@@ -548,7 +573,9 @@ Behavior: shows PIN, session label, connected-client list, local preview
 via `videoSource.addPreviewSink`; `DisposableEffect` removes the sink THEN releases the
 renderer). PRIMARY picker = `OpenDocument(arrayOf("video/*"))`; secondary =
 `PickVisualMedia(VideoOnly)`. "Start streaming" button invokes `onStartStreaming` to navigate
-to `MasterPlayerScreen`. Thermal chip, notification banner.
+to `MasterPlayerScreen`. Thermal chip, notification banner. A `QrCode2` action in the `TopAppBar`
+opens `QrJoinSheet` (enabled once live); a "Recent videos" list (from `recentVideos`) lets the
+master re-pick a previously streamed video via `playRecent`.
 
 ### `MasterPlayerScreen`
 ```kotlin
@@ -557,22 +584,29 @@ fun MasterPlayerScreen(viewModel: MasterViewModel, onBack: () -> Unit, onStopHos
 ```
 Behavior: full-screen player shown after the master taps "Start streaming". Embeds transport
 controls (play/pause, seek bar, −10 s / +10 s), loop toggle, PIN display, connected-client
-count, select-another-video picker, and a stop-hosting button that invokes `onStopHosting`.
-`onBack` navigates back to `MasterScreen` without stopping the stream.
+count, a video-library button that opens a recents bottom sheet (recent videos + "Pick from
+device"), a `QrCode2` top-bar action that opens `QrJoinSheet`, and a stop-hosting button that
+invokes `onStopHosting`. `onBack` navigates back to `MasterScreen` without stopping the stream.
 
 ## Package `com.syncstream.ui.client`
 
-### `DiscoveryScreen`
+### `QrScanScreen`
 ```kotlin
 @Composable
-fun DiscoveryScreen(
-    onConnect: (host: String, port: Int) -> Unit,
+fun QrScanScreen(
+    onScanned: (host: String, port: Int) -> Unit,
     onBack: () -> Unit,
     viewModel: ClientViewModel = viewModel(),
 )
 ```
-Behavior: lists `NsdDiscoverer.services`; debug manual host:port entry field as a fallback
-(emulators cannot do mDNS). PIN entry collected here or on `ClientScreen` before `connect`.
+Behavior: the client's entry point (replacing the old mDNS-only discovery screen). Leads with the
+live `NsdDiscoverer` **list of masters**, plus two actions: **Scan QR** — opens a full-screen camera
+scanner on demand (zxing `DecoratedBarcodeView`; shown only when `FEATURE_CAMERA_ANY`, `CAMERA`
+requested on tap, never on entry) — and **Enter code** — a dialog taking a single `host:port:pin`
+string (`JoinLink.parseCode`). Tapping a discovered master opens that dialog pre-filled with
+`host:port:`. Any resolved target stashes the PIN in `PendingConnection` and calls `onScanned`,
+guarded so only one path navigates. On Android TV (no camera) the Scan QR action is hidden.
+`PendingConnection` lives in this file.
 
 ### `ClientViewModel`
 ```kotlin
@@ -595,6 +629,9 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
     fun setMuted(muted: Boolean)
 }
 ```
+Note: `host`/`port`/`pin` reach `connect` from `QrScanScreen` via a scanned QR, the typed
+`host:port:pin` code, or the discovered list (all parsed through `JoinLink`). The session holds a
+`MulticastLock` during `connect` so the master's `.local` host ICE candidates resolve.
 Latency badge = delta-sampled `(ΔjitterBufferDelay / ΔjitterBufferEmittedCount)` from
 `pc.getStats` inbound-rtp + `rtt/2`, polled every 2s.
 
@@ -610,13 +647,15 @@ fun ClientScreen(
 ```
 Behavior: renders `remoteVideoTrack` into a `SurfaceViewRenderer` (init once with shared
 `EglBase.eglBaseContext`; `DisposableEffect` removes the sink THEN releases the renderer).
-Shows playhead, latency badge, mute toggle (default muted), connection/ended overlays.
+Shows playhead, latency badge, mute toggle (default muted), connection/ended overlays. Keeps the
+screen awake (`view.keepScreenOn`) only while `playhead.playing`.
 
 ---
 
 ## Shared type sources (already defined — import, don't redeclare)
 
 - `PeerState` -> `com.syncstream.core` (moved from `signaling` during modularization to keep `:webrtc` off Ktor)
+- `JoinLink`/`JoinInfo` -> `com.syncstream.core`
 - `ClientHandle` -> `com.syncstream.signaling.ClientRegistry`
 - `AdvertiseState`, `DiscoveredService`, `DiscoveryState` -> `com.syncstream.discovery`
 - `ConnectionState` -> `com.syncstream.signaling.SignalingClient`

@@ -7,8 +7,10 @@ devices (the **clients**), keeping every screen's playhead and audio frame-align
 
 ## How it works
 
-- **Discovery** — the master advertises `_syncstream._tcp` over mDNS/NSD; clients browse and
-  connect with a 4-digit PIN.
+- **Connecting** — the master shows a join **QR code** (encoding `host:port:pin`). The client joins
+  three ways: **scan** the QR (phones, one step); **type** the short `host:port:pin` code the master
+  prints beside the QR; or **pick** the master from the live mDNS list (`_syncstream._tcp`). The
+  typed-code and list paths exist for cameraless devices — see **Android TV** below.
 - **Transport** — WebRTC carries one shared video track (master → each client, SEND_ONLY) plus
   three DataChannels per client: `cmd`, `ping`, `audio`.
 - **Sync** — three planes keep clients aligned:
@@ -31,7 +33,7 @@ plugins, and the dependency direction is acyclic (enforced by the module graph).
   └─→ :feature-master, :feature-client, :design, :core
 
 :feature-master           MasterStreamingService (foreground service) + master UI/ViewModel
-:feature-client           client UI/ViewModel + discovery screen
+:feature-client           client UI/ViewModel + QR scan screen
   └─→ :webrtc :player :signaling :sync :discovery :design :core
 
 ── capability libraries ──
@@ -55,6 +57,8 @@ plugins, and the dependency direction is acyclic (enforced by the module graph).
 
 - Kotlin · Jetpack Compose · Coroutines
 - WebRTC (`io.github.webrtc-sdk`) · Media3 ExoPlayer · Ktor (CIO WebSocket) · Android NSD
+- ZXing (`com.google.zxing:core` to generate the join QR, `com.journeyapps:zxing-android-embedded`
+  for the client camera scanner)
 - `minSdk` 26 · `compileSdk` 36 · Java 17
 
 ## Build & run
@@ -64,22 +68,35 @@ plugins, and the dependency direction is acyclic (enforced by the module graph).
 ./gradlew :app:installDebug      # install on a connected device/emulator
 ```
 
-Run the app on two or more devices on the same network: pick **Master** on one — it becomes
-discoverable immediately (advertising over mDNS and accepting connections), before any video is
-chosen — then pick **Client** on the others to discover it and enter the PIN. On the master, pick a
-video and tap **Start streaming** to enter the full-screen player, which embeds transport controls
-(play/pause, seek, ±10 s, loop), the session PIN, connected-client count, a select-another-video
-button, and a stop-hosting button. The controls auto-hide after a few seconds during playback and
-reappear on tap (a tap while hidden only reveals them; a tap while shown toggles play/pause). Clients begin synchronized playback as soon as the master plays.
+Run the app on two or more devices on the same network: pick **Master** on one — it goes live
+immediately (accepting connections), before any video is chosen — and tap the **QR** action in its
+top bar to show the join code. Pick **Client** on the others; the client opens to a live list of
+masters on the network plus two actions — **Scan QR** (opens the camera on demand) and **Enter
+code** (a `host:port:pin` dialog) — or tap a discovered master and add the PIN. On the master,
+pick a video — or tap one from the **Recent videos** list (the last 10 streamed) — and tap **Start
+streaming** to enter the full-screen player, which embeds transport controls (play/pause, seek,
+±10 s, loop), the session PIN, connected-client count, a video-library button (recents + pick from
+device), a QR button, and a stop-hosting button. The controls auto-hide after a few seconds during
+playback and reappear on tap (a tap while hidden only reveals them; a tap while shown toggles
+play/pause). Clients begin synchronized playback as soon as the master plays, and a client keeps its
+screen awake while a video is playing.
 > Works over any shared LAN — including one phone's own **Wi-Fi hotspot** with no internet (the
 > master can host the hotspot itself). All media stays on the local network via host ICE candidates
 > (no STUN/TURN), so streaming never consumes mobile data. The shared `PeerConnectionFactory` sets
 > `disableNetworkMonitor` so libwebrtc enumerates the SoftAP (`ap0`) interface and gathers candidates
 > on it; without this the master gathers none over its own hotspot and no video flows.
-> Discovery auto-rescans while the client's list is empty and retries flaky NSD resolves, which
-> mDNS over a phone hotspot often needs. If it's still slow or unavailable (most emulators), use the
-> manual host:port entry on the client's discovery screen — the master shows its own **IP:port**
-> under the PIN for exactly this fallback.
+> Because the join QR carries the master's `host:port` directly, connecting never depends on mDNS —
+> it works the same on a phone hotspot or an emulator, where mDNS browsing is flaky or unavailable.
+> The master also prints its own **IP:port** under the PIN as a manual reference.
+
+### Android TV (client only)
+
+A TV is a natural **client** — the big screen to watch on — but has no camera. The client screen
+leads with a **list of discovered masters** and an **Enter code** dialog taking the
+`host:port:pin` string the master prints on its QR screen — both navigable with the remote. The manifest marks
+touchscreen, camera, and leanback as not-required and adds a `LEANBACK_LAUNCHER` entry so the app
+installs and launches on Android TV. Hosting (the master role, local file picking, the touch player)
+is still phone/tablet-oriented; the supported TV use case is joining as a client.
 
 ## Repository layout
 

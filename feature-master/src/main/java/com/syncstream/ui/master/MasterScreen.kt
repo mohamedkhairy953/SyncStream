@@ -22,6 +22,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -30,6 +31,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
@@ -38,7 +40,9 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -78,6 +82,9 @@ fun MasterScreen(
     val thermalWarning by viewModel.thermalWarning.collectAsStateWithLifecycle()
     val notificationsDenied by viewModel.notificationsDenied.collectAsStateWithLifecycle()
     val selectedUri by viewModel.selectedUri.collectAsStateWithLifecycle()
+    val recentVideos by viewModel.recentVideos.collectAsStateWithLifecycle()
+
+    var showQr by remember { mutableStateOf(false) }
 
     // Bind the service while the screen is in the foreground. NOTE: we intentionally do NOT unbind
     // on dispose. This composable leaves composition when navigating forward to MasterPlayerScreen,
@@ -98,8 +105,19 @@ fun MasterScreen(
 
     val streaming = pin.isNotEmpty()
 
+    val canShowQr = endpoint != null && pin.isNotEmpty()
+
     Scaffold(
-        topBar = { TopAppBar(title = { Text("Master") }) },
+        topBar = {
+            TopAppBar(
+                title = { Text("Master") },
+                actions = {
+                    IconButton(onClick = { showQr = true }, enabled = canShowQr) {
+                        Icon(Icons.Filled.QrCode2, contentDescription = "Show join QR code")
+                    }
+                },
+            )
+        },
     ) { padding ->
         Column(
             modifier = Modifier
@@ -140,6 +158,11 @@ fun MasterScreen(
                 )
             }
 
+            RecentVideosSection(
+                recents = recentVideos,
+                onPick = { viewModel.playRecent(it) },
+            )
+
             // ---- Streaming controls ----
             // The session goes live automatically on entering this screen (see MasterViewModel),
             // so the master is discoverable/joinable before any video is picked. "Start streaming"
@@ -171,6 +194,38 @@ fun MasterScreen(
             }
 
             ClientList(clients = clients)
+        }
+    }
+
+    if (showQr) {
+        QrJoinSheet(endpoint = endpoint, pin = pin, onDismiss = { showQr = false })
+    }
+}
+
+@Composable
+private fun RecentVideosSection(recents: List<RecentVideo>, onPick: (RecentVideo) -> Unit) {
+    if (recents.isEmpty()) return
+    Text(
+        "Recent videos",
+        style = MaterialTheme.typography.titleMedium,
+    )
+    // A plain Column (not LazyColumn) because this screen is already inside a verticalScroll; the
+    // list is capped at 10 items so it stays cheap.
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        recents.forEach { recent ->
+            Card(
+                onClick = { onPick(recent) },
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+            ) {
+                Text(
+                    recent.name,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
+                )
+            }
         }
     }
 }
