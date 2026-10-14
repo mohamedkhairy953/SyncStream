@@ -39,6 +39,8 @@ import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.outlined.People
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -104,6 +106,7 @@ fun MasterPlayerScreen(
     val selectedUri by viewModel.selectedUri.collectAsStateWithLifecycle()
     val thermalWarning by viewModel.thermalWarning.collectAsStateWithLifecycle()
     val loop by viewModel.loop.collectAsStateWithLifecycle()
+    val speed by viewModel.speed.collectAsStateWithLifecycle()
     val endpoint by viewModel.endpoint.collectAsStateWithLifecycle()
     val recentVideos by viewModel.recentVideos.collectAsStateWithLifecycle()
 
@@ -310,6 +313,7 @@ fun MasterPlayerScreen(
                     durationMs = playback.durationMs,
                     playing = playback.playing,
                     loop = loop,
+                    speed = speed,
                     pin = pin,
                     clientCount = clients.size,
                     thermalWarning = thermalWarning,
@@ -317,6 +321,7 @@ fun MasterPlayerScreen(
                     onRewind = { keepControlsAlive(); viewModel.seekTo((playback.positionMs - 10_000L).coerceAtLeast(0L)) },
                     onForward = { keepControlsAlive(); viewModel.seekTo(playback.positionMs + 10_000L) },
                     onToggleLoop = { keepControlsAlive(); viewModel.setLoop(!loop) },
+                    onSetSpeed = { keepControlsAlive(); viewModel.setSpeed(it) },
                     onSelectVideo = { keepControlsAlive(); showRecents = true },
                     onInteract = keepControlsAlive,
                     modifier = Modifier.align(Alignment.BottomCenter),
@@ -449,6 +454,7 @@ private fun BottomPanel(
     durationMs: Long,
     playing: Boolean,
     loop: Boolean,
+    speed: Float,
     pin: String,
     clientCount: Int,
     thermalWarning: Boolean,
@@ -456,6 +462,7 @@ private fun BottomPanel(
     onRewind: () -> Unit,
     onForward: () -> Unit,
     onToggleLoop: () -> Unit,
+    onSetSpeed: (Float) -> Unit,
     onSelectVideo: () -> Unit,
     onInteract: () -> Unit,
     modifier: Modifier = Modifier,
@@ -463,15 +470,13 @@ private fun BottomPanel(
     val duration = durationMs.coerceAtLeast(0L)
     val sliderMax = duration.coerceAtLeast(1L).toFloat()
 
-    // Smooth, synced position: ExoPlayer only publishes on discrete events, so advance locally
-    // while playing and resync whenever the authoritative positionMs/playing/duration change.
     var ticked by remember { mutableLongStateOf(positionMs) }
-    LaunchedEffect(positionMs, playing, duration) {
+    LaunchedEffect(positionMs, playing, duration, speed) {
         ticked = positionMs
         if (playing && duration > 0) {
             while (true) {
                 delay(500)
-                ticked = (ticked + 500).coerceAtMost(duration)
+                ticked = (ticked + (500L * speed).toLong()).coerceAtMost(duration)
             }
         }
     }
@@ -548,6 +553,7 @@ private fun BottomPanel(
                         modifier = Modifier.size(24.dp),
                     )
                 }
+                SpeedButton(speed = speed, onSetSpeed = onSetSpeed)
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -592,6 +598,45 @@ private fun BottomPanel(
                 }
             }
         }
+    }
+}
+
+private val SPEED_OPTIONS = floatArrayOf(0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f)
+
+@Composable
+private fun SpeedButton(speed: Float, onSetSpeed: (Float) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        TextButton(onClick = { expanded = true }) {
+            Text(
+                formatSpeed(speed),
+                color = if (speed != 1f) MaterialTheme.colorScheme.primary else Color.White,
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            SPEED_OPTIONS.forEach { option ->
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            formatSpeed(option),
+                            fontWeight = if (option == speed) FontWeight.Bold else FontWeight.Normal,
+                            color = if (option == speed) MaterialTheme.colorScheme.primary else Color.Unspecified,
+                        )
+                    },
+                    onClick = { onSetSpeed(option); expanded = false },
+                )
+            }
+        }
+    }
+}
+
+private fun formatSpeed(speed: Float): String {
+    return if (speed == speed.toInt().toFloat()) {
+        "${speed.toInt()}x"
+    } else {
+        "${speed}x"
     }
 }
 

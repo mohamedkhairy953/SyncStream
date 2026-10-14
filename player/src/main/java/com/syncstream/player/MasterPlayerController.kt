@@ -158,10 +158,21 @@ class MasterPlayerController(
 
     fun isPlaying(): Boolean = player.isPlaying
 
+    @Volatile
+    private var currentSpeed = 1f
+
     /** Enables/disables the loop behaviour (STATE_ENDED -> seek-to-0; caller broadcasts Seek). */
     fun setLoop(enabled: Boolean) {
         loopEnabled = enabled
     }
+
+    fun setSpeed(speed: Float) {
+        currentSpeed = speed
+        player.setPlaybackSpeed(speed)
+        publishState()
+    }
+
+    fun currentSpeed(): Float = currentSpeed
 
     /** Releases the MediaSession and player. The [videoSource] and [pcmTap] are owned elsewhere. */
     fun release() {
@@ -177,6 +188,7 @@ class MasterPlayerController(
             positionMs = currentPositionMs(),
             durationMs = durationMs(),
             ended = ended,
+            speed = currentSpeed,
         )
     }
 }
@@ -191,4 +203,5 @@ data class PlaybackInfo(
     val positionMs: Long,
     val durationMs: Long,
     val ended: Boolean,
+    val speed: Float = 1f,
 )

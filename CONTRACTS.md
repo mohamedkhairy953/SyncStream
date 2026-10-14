@@ -4,7 +4,7 @@ This document is the binding API contract for all phase-2 work. Five parallel ag
 implement against these signatures **without coordinating**. Do not change a public
 signature here without updating this file. Foundation files already written (do not
 redefine): `signaling/SignalMessage.kt` (`SignalMessage` sealed type + `SignalJson`),
-`sync/SyncMessage.kt` (`SyncMessage` sealed type + `SyncJson`), `webrtc/RtcConfigs.kt`,
+`sync/SyncMessage.kt` (`SyncMessage` sealed type + `SyncJson`, including client-to-master `PlayReq`/`PauseReq`/`SeekReq`), `webrtc/RtcConfigs.kt`,
 `ui/theme/Theme.kt` (`SyncStreamTheme`), `SyncStreamApp`, `AppContainer`, `MainActivity`.
 
 ## Dependency direction (acyclic — enforce strictly)
@@ -410,11 +410,21 @@ Behavior: keep 5 lowest-RTT of each burst, take median; `rtt = t2 - t0`,
 ### `SyncEngine`
 ```kotlin
 // Master: broadcasts Play/Pause/Seek/End + a State heartbeat (every 1s) on "cmd".
+//   Also observes incoming client requests (PlayReq/PauseReq/SeekReq) and forwards to Callbacks.
 // Client: consumes commands and computes the displayed playhead using ClockSync.offset.
+//   Can also send playback requests back to the master on the same channel.
 class SyncEngine(private val scope: CoroutineScope)
 
+interface Callbacks {
+    fun onClientPlay(positionMs: Long)
+    fun onClientPause(positionMs: Long)
+    fun onClientSeek(positionMs: Long)
+}
+
+fun setMasterCallbacks(callbacks: Callbacks?)
+
 // ---- Master side ----
-fun registerCmdChannel(sessionId: String, channel: DataChannel)
+fun registerCmdChannel(sessionId: String, channel: DataChannel)   // also observes incoming client requests
 fun unregisterCmdChannel(sessionId: String)
 fun broadcastPlay(positionMs: Long)        // stamps masterClockMs = elapsedRealtime()
 fun broadcastPause(positionMs: Long)
@@ -425,6 +435,9 @@ fun broadcastEnd()
 // ---- Client side ----
 fun attachClientCmdChannel(channel: DataChannel, clock: ClockSync)
 val clientPlayhead: StateFlow<PlayheadInfo>   // computed display playhead, clamped to duration
+fun sendPlayRequest(positionMs: Long)         // client -> master: request play
+fun sendPauseRequest(positionMs: Long)        // client -> master: request pause
+fun sendSeekRequest(positionMs: Long)         // client -> master: request seek
 ```
 ```kotlin
 data class PlayheadInfo(
@@ -627,6 +640,9 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
     fun connect(host: String, port: Int, pin: String, previousSessionId: String? = null)
     fun disconnect()
     fun setMuted(muted: Boolean)
+    fun play()                                // send PlayReq to master via SyncEngine
+    fun pause()                               // send PauseReq to master via SyncEngine
+    fun seekTo(positionMs: Long)              // send SeekReq to master via SyncEngine
 }
 ```
 Note: `host`/`port`/`pin` reach `connect` from `QrScanScreen` via a scanned QR, the typed
@@ -647,8 +663,9 @@ fun ClientScreen(
 ```
 Behavior: renders `remoteVideoTrack` into a `SurfaceViewRenderer` (init once with shared
 `EglBase.eglBaseContext`; `DisposableEffect` removes the sink THEN releases the renderer).
-Shows playhead, latency badge, mute toggle (default muted), connection/ended overlays. Keeps the
-screen awake (`view.keepScreenOn`) only while `playhead.playing`.
+Auto-hiding transport controls (play/pause, seek bar, +/-10s) appear on tap and hide after 3.5s
+during playback. Also shows latency badge, mute toggle (default muted), connection/ended overlays.
+Keeps the screen awake (`view.keepScreenOn`) only while `playhead.playing`.
 
 ---
 

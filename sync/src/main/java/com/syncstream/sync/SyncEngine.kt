@@ -16,6 +16,8 @@ import java.nio.ByteBuffer
  * MASTER: registers each client's cmd channel and broadcasts [SyncMessage.Play]/[SyncMessage.Pause]/
  * [SyncMessage.Seek]/[SyncMessage.End] plus a [SyncMessage.State] heartbeat (the service ticks every
  * 1 s). Every outbound position-bearing command stamps `masterClockMs = elapsedRealtime()`.
+ * Also observes incoming client requests ([SyncMessage.PlayReq]/[PauseReq]/[SeekReq]) and
+ * forwards them to [Callbacks].
  *
  * CLIENT: consumes the command stream and continuously recomputes the displayed playhead using the
  * latest authoritative [SyncMessage.State] plus [ClockSync.offsetMs]:
@@ -24,17 +26,53 @@ import java.nio.ByteBuffer
  *
  * clamped to `[0, durationMs]`. The displayed value is recomputed on each incoming message; the UI
  * extrapolates between messages from this base (the formula is monotonic for a fixed State).
+ * The client can also send playback requests ([sendPlayRequest], [sendPauseRequest],
+ * [sendSeekRequest]) back to the master on the same channel.
  */
 class SyncEngine(private val scope: CoroutineScope) {
+
+    /** Callback for master-side handling of client playback requests. */
+    interface Callbacks {
+        fun onClientPlay(positionMs: Long)
+        fun onClientPause(positionMs: Long)
+        fun onClientSeek(positionMs: Long)
+        fun onClientSpeed(speed: Float)
+    }
+
+    private var masterCallbacks: Callbacks? = null
+
+    /** Sets the master-side callback for client playback requests. */
+    fun setMasterCallbacks(callbacks: Callbacks?) {
+        masterCallbacks = callbacks
+    }
 
     // ---- Master side ----
 
     /** Registered client cmd channels keyed by sessionId. */
     private val cmdChannels = ConcurrentHashMap<String, DataChannel>()
 
-    /** Registers (or replaces) the cmd channel for [sessionId]. */
+    /** Registers (or replaces) the cmd channel for [sessionId]. Observes incoming client requests. */
     fun registerCmdChannel(sessionId: String, channel: DataChannel) {
         cmdChannels[sessionId] = channel
+        channel.registerObserver(object : DataChannel.Observer {
+            override fun onBufferedAmountChange(previousAmount: Long) {}
+            override fun onStateChange() {}
+            override fun onMessage(buffer: DataChannel.Buffer) {
+                if (buffer.binary) return
+                val msg = decode(buffer.data) ?: return
+                handleMasterMessage(sessionId, msg)
+            }
+        })
+    }
+
+    private fun handleMasterMessage(sessionId: String, message: SyncMessage) {
+        when (message) {
+            is SyncMessage.PlayReq -> masterCallbacks?.onClientPlay(message.positionMs)
+            is SyncMessage.PauseReq -> masterCallbacks?.onClientPause(message.positionMs)
+            is SyncMessage.SeekReq -> masterCallbacks?.onClientSeek(message.positionMs)
+            is SyncMessage.SpeedReq -> masterCallbacks?.onClientSpeed(message.speed)
+            else -> Unit // master ignores its own broadcast types echoed back
+        }
     }
 
     /** Unregisters the cmd channel for [sessionId] (peer gone / reconnect). */
@@ -55,13 +93,14 @@ class SyncEngine(private val scope: CoroutineScope) {
     }
 
     /** Heartbeat (caller ticks every 1 s). Carries the authoritative master playback snapshot. */
-    fun broadcastState(playing: Boolean, positionMs: Long, durationMs: Long) {
+    fun broadcastState(playing: Boolean, positionMs: Long, durationMs: Long, speed: Float = 1f) {
         broadcast(
             SyncMessage.State(
                 playing = playing,
                 positionMs = positionMs,
                 masterClockMs = SystemClock.elapsedRealtime(),
                 durationMs = durationMs,
+                speed = speed,
             ),
         )
     }
@@ -131,6 +170,35 @@ class SyncEngine(private val scope: CoroutineScope) {
         ended = false
     }
 
+    /** CLIENT: request the master to play/resume at [positionMs]. */
+    fun sendPlayRequest(positionMs: Long) {
+        sendToMaster(SyncMessage.PlayReq(positionMs))
+    }
+
+    /** CLIENT: request the master to pause at [positionMs]. */
+    fun sendPauseRequest(positionMs: Long) {
+        sendToMaster(SyncMessage.PauseReq(positionMs))
+    }
+
+    /** CLIENT: request the master to seek to [positionMs]. */
+    fun sendSeekRequest(positionMs: Long) {
+        sendToMaster(SyncMessage.SeekReq(positionMs))
+    }
+
+    /** CLIENT: request the master to change playback speed. */
+    fun sendSpeedRequest(speed: Float) {
+        sendToMaster(SyncMessage.SpeedReq(speed))
+    }
+
+    private fun sendToMaster(message: SyncMessage) {
+        val channel = clientChannel ?: return
+        if (channel.state() != DataChannel.State.OPEN) return
+        val bytes = encode(message)
+        runCatching {
+            channel.send(DataChannel.Buffer(ByteBuffer.wrap(bytes), /* binary = */ false))
+        }
+    }
+
     private fun handleClientMessage(message: SyncMessage) {
         when (message) {
             is SyncMessage.State -> {
@@ -164,7 +232,10 @@ class SyncEngine(private val scope: CoroutineScope) {
                     durationMs = prev?.durationMs ?: _clientPlayhead.value.durationMs,
                 )
             }
-            is SyncMessage.Ping, is SyncMessage.Pong -> Unit // clock-channel traffic; ignore here
+            is SyncMessage.Ping, is SyncMessage.Pong,
+            is SyncMessage.PlayReq, is SyncMessage.PauseReq, is SyncMessage.SeekReq,
+            is SyncMessage.SpeedReq,
+            -> Unit // clock-channel traffic or master-bound requests; ignore on client
         }
     }
 
@@ -186,16 +257,17 @@ class SyncEngine(private val scope: CoroutineScope) {
 
     /**
      * Computes the displayed playhead from [state] and the current clock offset:
-     * `positionMs + (if playing) (clientNow + offset - state.masterClockMs)`, clamped to the
-     * duration. Called on every incoming command; the UI can recompute live from [lastState] +
-     * offset for sub-second smoothness, but this gives an immediate authoritative snapshot.
+     * `positionMs + (if playing) speed * (clientNow + offset - state.masterClockMs)`, clamped to
+     * the duration. The speed factor accounts for non-1x playback so the extrapolated position
+     * advances at the correct rate relative to wall-clock time.
      */
     private fun publishPlayhead(state: SyncMessage.State) {
         if (ended) return
         val offset = clientClock?.offsetMs?.value ?: 0L
+        val speed = state.speed.coerceAtLeast(0f)
         val extrapolated = if (state.playing) {
             val clientNow = SystemClock.elapsedRealtime()
-            state.positionMs + (clientNow + offset - state.masterClockMs)
+            state.positionMs + ((clientNow + offset - state.masterClockMs) * speed).toLong()
         } else {
             state.positionMs
         }
@@ -209,6 +281,7 @@ class SyncEngine(private val scope: CoroutineScope) {
             playing = state.playing,
             positionMs = clamped,
             durationMs = duration,
+            speed = speed,
         )
     }
 
@@ -235,4 +308,5 @@ data class PlayheadInfo(
     val playing: Boolean,
     val positionMs: Long,
     val durationMs: Long,
+    val speed: Float = 1f,
 )

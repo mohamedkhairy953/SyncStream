@@ -169,6 +169,22 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
         audioReceiver?.setMuted(muted)
     }
 
+    fun play() {
+        syncEngine?.sendPlayRequest(_playhead.value.positionMs)
+    }
+
+    fun pause() {
+        syncEngine?.sendPauseRequest(_playhead.value.positionMs)
+    }
+
+    fun seekTo(positionMs: Long) {
+        syncEngine?.sendSeekRequest(positionMs)
+    }
+
+    fun setSpeed(speed: Float) {
+        syncEngine?.sendSpeedRequest(speed)
+    }
+
     // ---- Wiring ----
 
     private fun signalingCallbacks(peers: ClientPeerManager) = object : SignalingClient.Callbacks {

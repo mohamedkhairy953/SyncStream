@@ -19,6 +19,7 @@ devices (the **clients**), keeping every screen's playhead and audio frame-align
      clock domain everywhere is `SystemClock.elapsedRealtime()`.
   3. *Playback sync* (`cmd`): the master broadcasts Play/Pause/Seek/End + a 1 Hz heartbeat;
      clients compute their displayed playhead from the master clock and the measured offset.
+     Clients can also send Play/Pause/Seek requests back to the master on the same channel.
 - **Audio** — decoded PCM is tapped from the master's ExoPlayer and streamed as 20 ms frames over
   the `audio` DataChannel; clients play it back scheduled against the synced clock (muted by
   default).
@@ -79,7 +80,8 @@ streaming** to enter the full-screen player, which embeds transport controls (pl
 device), a QR button, and a stop-hosting button. The controls auto-hide after a few seconds during
 playback and reappear on tap (a tap while hidden only reveals them; a tap while shown toggles
 play/pause). Clients begin synchronized playback as soon as the master plays, and a client keeps its
-screen awake while a video is playing.
+screen awake while a video is playing. Clients also have auto-hiding transport controls
+(play/pause, seek bar, ±10 s) — any client can control playback for all participants.
 > Works over any shared LAN — including one phone's own **Wi-Fi hotspot** with no internet (the
 > master can host the hotspot itself). All media stays on the local network via host ICE candidates
 > (no STUN/TURN), so streaming never consumes mobile data. The shared `PeerConnectionFactory` sets

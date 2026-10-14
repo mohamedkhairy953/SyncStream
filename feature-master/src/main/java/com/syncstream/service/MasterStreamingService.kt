@@ -226,6 +226,23 @@ class MasterStreamingService : LifecycleService() {
 
         val sync = SyncEngine(serviceScope)
         syncEngine = sync
+        sync.setMasterCallbacks(object : SyncEngine.Callbacks {
+            override fun onClientPlay(positionMs: Long) {
+                play()
+            }
+
+            override fun onClientPause(positionMs: Long) {
+                pause()
+            }
+
+            override fun onClientSeek(positionMs: Long) {
+                seekTo(positionMs)
+            }
+
+            override fun onClientSpeed(speed: Float) {
+                setSpeed(speed)
+            }
+        })
 
         val peers = MasterPeerManager(
             core = core,
@@ -274,6 +291,7 @@ class MasterStreamingService : LifecycleService() {
                     playing = snapshot.playing,
                     positionMs = snapshot.positionMs,
                     durationMs = snapshot.durationMs,
+                    speed = snapshot.speed,
                 )
             }
         }
@@ -298,6 +316,16 @@ class MasterStreamingService : LifecycleService() {
 
     fun setLoop(enabled: Boolean) {
         playerController?.setLoop(enabled)
+    }
+
+    fun setSpeed(speed: Float) {
+        playerController?.setSpeed(speed)
+        syncEngine?.broadcastState(
+            playing = playerController?.isPlaying() ?: false,
+            positionMs = playerController?.currentPositionMs() ?: 0L,
+            durationMs = playerController?.durationMs() ?: 0L,
+            speed = speed,
+        )
     }
 
     /** Tears down all runtime in strict reverse order. App-scoped EGL/factory persist. */
@@ -334,6 +362,7 @@ class MasterStreamingService : LifecycleService() {
         pcmTap = null
         audioStreamer?.reset()
         audioStreamer = null
+        syncEngine?.setMasterCallbacks(null)
         syncEngine = null
 
         // 7. videoSource.release().

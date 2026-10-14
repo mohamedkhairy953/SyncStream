@@ -55,12 +55,33 @@ sealed class SyncMessage {
         val positionMs: Long,
         val masterClockMs: Long,
         val durationMs: Long,
+        val speed: Float = 1f,
     ) : SyncMessage()
 
     /** Master -> client: playback ended (STATE_ENDED). */
     @Serializable
     @SerialName("End")
     data object End : SyncMessage()
+
+    /** Client -> master: request play/resume at [positionMs]. Sent on "cmd". */
+    @Serializable
+    @SerialName("PlayReq")
+    data class PlayReq(val positionMs: Long) : SyncMessage()
+
+    /** Client -> master: request pause at [positionMs]. */
+    @Serializable
+    @SerialName("PauseReq")
+    data class PauseReq(val positionMs: Long) : SyncMessage()
+
+    /** Client -> master: request seek to [positionMs]. */
+    @Serializable
+    @SerialName("SeekReq")
+    data class SeekReq(val positionMs: Long) : SyncMessage()
+
+    /** Client -> master: request playback speed change. */
+    @Serializable
+    @SerialName("SpeedReq")
+    data class SpeedReq(val speed: Float) : SyncMessage()
 }
 
 /** Shared [Json] for DataChannel control messages. */

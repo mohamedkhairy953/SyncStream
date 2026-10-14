@@ -63,6 +63,9 @@ class MasterViewModel(app: Application) : AndroidViewModel(app) {
     private val _loop = MutableStateFlow(false)
     val loop: StateFlow<Boolean> = _loop.asStateFlow()
 
+    private val _speed = MutableStateFlow(1f)
+    val speed: StateFlow<Float> = _speed.asStateFlow()
+
     private val _selectedUri = MutableStateFlow<Uri?>(null)
     val selectedUri: StateFlow<Uri?> = _selectedUri.asStateFlow()
 
@@ -146,6 +149,11 @@ class MasterViewModel(app: Application) : AndroidViewModel(app) {
     fun setLoop(enabled: Boolean) {
         _loop.value = enabled
         service?.setLoop(enabled)
+    }
+
+    fun setSpeed(speed: Float) {
+        _speed.value = speed
+        service?.setSpeed(speed)
     }
 
     /** Whether POST_NOTIFICATIONS is currently granted (used to drive the runtime request). */
