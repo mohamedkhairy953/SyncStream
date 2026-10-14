@@ -656,9 +656,14 @@ fun HostPickScreen(viewModel: MasterViewModel, onVideoChosen: () -> Unit, onEndR
 ```
 Pick-a-video step. The room is live as soon as the screen binds (the 4-digit room code is `pin`).
 Shows recents (`VideoThumbnail`) and a pick-from-device action; choosing a
-video calls `onVideoChosen`. `InviteSheet` (internal) auto-opens while no guest is connected and
-shows the room code, join QR (`JoinQr`), endpoint, guest avatars, **Play for everyone** and **End
-room**. Back shows an "End room?" `ConfirmDialog`; the notification banner's End room also calls
+video calls `onVideoChosen`. The `RoomChip` opens `InviteSheet` (internal, it does not auto-open
+here):
+```kotlin
+@Composable internal fun InviteSheet(endpoint: String?, pin: String, guests: List<String>,
+    playing: Boolean, onPlayForEveryone: () -> Unit, onEndRoom: () -> Unit, onDismiss: () -> Unit)
+```
+It shows the room code, join QR (`JoinQr`), the typed `host:port:pin` code, guest avatars,
+**Play for everyone** and **End room**. Back shows an "End room?" `ConfirmDialog`; the notification banner's End room also calls
 `onEndRoom`. The caller must stop streaming in `onEndRoom` and pop to `home`.
 
 ### `MasterPlayerScreen`
@@ -666,9 +671,10 @@ room**. Back shows an "End room?" `ConfirmDialog`; the notification banner's End
 @Composable
 fun MasterPlayerScreen(viewModel: MasterViewModel, onBack: () -> Unit, onEndRoom: () -> Unit)
 ```
-Full-screen player built on `PlayerOverlayScaffold`: `RoomChip` (opens the invite sheet),
-guest count, `SeekBar`, `TransportControls` with `SpeedMenu` (0.5–2x), loop toggle and a
-video-library button (recents + "Pick from device"). `onBack` returns to `HostPickScreen` without
+Full-screen player built on `PlayerOverlayScaffold`: `RoomChip` (opens the invite sheet, which also
+auto-opens once on first composition while no guest has joined and nothing is playing),
+`GuestAvatarRow`, `SeekBar`, `TransportControls` with `SpeedMenu` (0.5–2x), loop toggle and a
+video-library button (which calls `onBack` to return to the picker). `onBack` returns to `HostPickScreen` without
 stopping the room; `onEndRoom` ends it (the caller stops streaming and pops to `home`).
 
 ## Package `com.syncstream.ui.client`
@@ -727,6 +733,7 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
     val muted: StateFlow<Boolean>             // DEFAULT true
     val latencyBadgeMs: StateFlow<Long>       // delta-sampled jitterBufferDelay + rtt/2, polled 2s
     val remoteVideoTrack: StateFlow<VideoTrack?>
+    val eglContext: EglBase.Context           // shared EGL context for the watch SurfaceViewRenderer
     val joinStatus: StateFlow<JoinStatus>     // Idle | Trying | Done(MatchResult)
     val currentRoom: StateFlow<RoomTarget?>
 

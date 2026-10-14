@@ -7,11 +7,11 @@ devices (the **clients**), keeping every screen's playhead and audio frame-align
 
 ## How it works
 
-- **Connecting** — the host shows a 4-digit **room code** (plus a join QR encoding `host:port:pin`
+- **Connecting** — the host shows a 4-digit **room code** (plus a join QR encoding a `syncstream://join?h=…&p=…&pin=…` link
   on the invite sheet). A guest joins by tapping a **nearby room** on Home (found over mDNS,
   `_syncstream._tcp`) and typing the code, by **entering the code** with no room chosen (the app
   tries it against every room it can see), or by **scanning** the QR (phones, one step). A
-  **Trouble connecting?** fallback accepts the raw `host:port:pin` string for cameraless devices
+  **Trouble connecting?** fallback accepts the raw typed `host:port:pin` string for cameraless devices
   such as Android TV — see **Android TV** below.
 - **Transport** — WebRTC carries one shared video track (master → each client, SEND_ONLY) plus
   three DataChannels per client: `cmd`, `ping`, `audio`.
@@ -49,7 +49,7 @@ plugins, and the dependency direction is acyclic (enforced by the module graph).
 :discovery   NsdAdvertiser, NsdDiscoverer                                   (standalone)
 
 ── foundation ──
-:design      design system: theme tokens + shared Compose components      → :core
+:design      design system: theme tokens + shared Compose components      (no project deps)
 :core        AppContainer (EglBase/PeerConnectionFactory/scope/Json), PeerState
 ```
 

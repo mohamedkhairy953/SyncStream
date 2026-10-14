@@ -6,6 +6,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
@@ -101,12 +102,12 @@ private fun SyncStreamNavHost() {
             modifier = Modifier.fillMaxSize(),
         ) {
             composable("home") {
-                Box(modifier = Modifier.padding(innerPadding)) {
+                Box(modifier = Modifier.padding(innerPadding).consumeWindowInsets(innerPadding)) {
                     HomeScreen(
-                        onHost = { navController.navigate("masterGraph") },
-                        onJoinRoom = { navController.navigate(joinCodeRoute(it)) },
-                        onScan = { navController.navigate("scan") },
-                        onEnterCode = { navController.navigate("joinCode") },
+                        onHost = { navController.navigate("masterGraph") { launchSingleTop = true } },
+                        onJoinRoom = { navController.navigate(joinCodeRoute(it)) { launchSingleTop = true } },
+                        onScan = { navController.navigate("scan") { launchSingleTop = true } },
+                        onEnterCode = { navController.navigate("joinCode") { launchSingleTop = true } },
                     )
                 }
             }
@@ -114,7 +115,7 @@ private fun SyncStreamNavHost() {
             navigation(startDestination = "hostPick", route = "masterGraph") {
                 composable("hostPick") { entry ->
                     val vm = masterVm(entry)
-                    Box(modifier = Modifier.padding(innerPadding)) {
+                    Box(modifier = Modifier.padding(innerPadding).consumeWindowInsets(innerPadding)) {
                         HostPickScreen(
                             viewModel = vm,
                             onVideoChosen = { navController.navigate("masterPlayer") },
@@ -146,7 +147,7 @@ private fun SyncStreamNavHost() {
                     val port = entry.arguments?.getInt("port") ?: -1
                     val label = entry.arguments?.getString("label")
                     val room = if (host != null && port >= 0) RoomTarget(host, port, label ?: host) else null
-                    Box(modifier = Modifier.padding(innerPadding)) {
+                    Box(modifier = Modifier.padding(innerPadding).consumeWindowInsets(innerPadding)) {
                         JoinCodeScreen(
                             viewModel = vm,
                             room = room,
