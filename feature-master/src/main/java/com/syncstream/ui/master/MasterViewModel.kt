@@ -119,13 +119,22 @@ class MasterViewModel(app: Application) : AndroidViewModel(app) {
         _bound.value = false
     }
 
+    /**
+     * Selects [uri] and loads it into the (already live) room PAUSED at 0; the host starts playback
+     * from the player ("Play for everyone" or the play button). Loads exactly once: if the service
+     * isn't bound yet, [onServiceConnected] loads the selection instead.
+     */
     fun onMediaPicked(uri: Uri) {
         val resolver = getApplication<Application>().contentResolver
         runCatching {
             resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         _selectedUri.value = uri
-        service?.setMediaUri(uri)
+        val svc = service ?: return
+        svc.setMediaUri(uri)
+        // The load is synchronous and paused; reflect it now so the player screen's first
+        // composition (invite auto-open) doesn't see the previous video's "playing".
+        _playback.value = _playback.value.copy(playing = false, positionMs = 0L, ended = false)
     }
 
     /** Re-select a video from the recent-history list. */
@@ -133,10 +142,9 @@ class MasterViewModel(app: Application) : AndroidViewModel(app) {
         onMediaPicked(Uri.parse(recent.uri))
     }
 
+    /** Makes the room live (idempotent; binding already does this). Does not reload the media. */
     fun startStreaming() {
-        val svc = service ?: return
-        svc.startStreaming()
-        _selectedUri.value?.let { svc.setMediaUri(it) }
+        service?.startStreaming()
     }
 
     fun stopStreaming() {

@@ -110,6 +110,17 @@ class MasterPlayerController(
             publishState()
         }
 
+        // playWhenReady / suppression flip on audio-focus loss, becoming-noisy, MediaSession media
+        // buttons (e.g. Bluetooth AVRCP) and our own play()/pause(). [PlaybackInfo.playing] is
+        // derived from them, so republish on every change rather than relying on isPlaying alone.
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            publishState()
+        }
+
+        override fun onPlaybackSuppressionReasonChanged(playbackSuppressionReason: Int) {
+            publishState()
+        }
+
         override fun onPositionDiscontinuity(
             oldPosition: Player.PositionInfo,
             newPosition: Player.PositionInfo,
@@ -130,9 +141,15 @@ class MasterPlayerController(
         player.playWhenReady = false
     }
 
-    /** Loads the OpenDocument [uri] (persistable permission already taken upstream) and prepares. */
+    /**
+     * Loads the OpenDocument [uri] (persistable permission already taken upstream) and prepares it
+     * PAUSED at position 0: the first frame renders (and streams) but playback only starts on an
+     * explicit [play]. playWhenReady is reset because it otherwise survives from the previous item,
+     * which made a re-picked video auto-play.
+     */
     fun setMediaUri(uri: Uri) {
-        player.setMediaItem(MediaItem.fromUri(uri))
+        player.playWhenReady = false
+        player.setMediaItem(MediaItem.fromUri(uri), /* startPositionMs = */ 0L)
         player.prepare()
         publishState()
     }
@@ -158,6 +175,20 @@ class MasterPlayerController(
 
     fun isPlaying(): Boolean = player.isPlaying
 
+    /**
+     * Whether the playhead is meant to be advancing: playWhenReady, not suppressed (e.g. by a
+     * transient audio-focus loss) and READY or BUFFERING. Unlike [ExoPlayer.isPlaying] this stays
+     * true through the brief rebuffer after a seek, so the transport glyph (and the Play/Pause
+     * broadcast to guests) doesn't flicker; it turns false for every real pause — user, guest,
+     * audio-focus loss, becoming-noisy, media button, end, idle/error.
+     */
+    private fun isPlayingIntent(): Boolean {
+        val state = player.playbackState
+        return player.playWhenReady &&
+            player.playbackSuppressionReason == Player.PLAYBACK_SUPPRESSION_REASON_NONE &&
+            (state == Player.STATE_READY || state == Player.STATE_BUFFERING)
+    }
+
     @Volatile
     private var currentSpeed = 1f
 
@@ -174,6 +205,15 @@ class MasterPlayerController(
 
     fun currentSpeed(): Float = currentSpeed
 
+    /**
+     * Re-samples the live player state into [playback]. Listener callbacks already publish every
+     * transition; the service also calls this on its 1 s heartbeat so the position stays fresh and
+     * the flow converges even if a transition were ever missed. Main thread only.
+     */
+    fun refresh() {
+        publishState()
+    }
+
     /** Releases the MediaSession and player. The [videoSource] and [pcmTap] are owned elsewhere. */
     fun release() {
         player.removeListener(listener)
@@ -184,7 +224,7 @@ class MasterPlayerController(
     private fun publishState() {
         val ended = player.playbackState == Player.STATE_ENDED
         _playback.value = PlaybackInfo(
-            playing = player.isPlaying,
+            playing = isPlayingIntent(),
             positionMs = currentPositionMs(),
             durationMs = durationMs(),
             ended = ended,
@@ -195,8 +235,9 @@ class MasterPlayerController(
 
 /**
  * Authoritative master playback snapshot surfaced to the UI and used to seed [SyncMessage.State]
- * heartbeats. [positionMs]/[durationMs] are in the media timeline; [PlaybackInfo.ended] reflects
- * ExoPlayer STATE_ENDED.
+ * heartbeats. [playing] is the playback intent (playWhenReady, not suppressed, READY or BUFFERING);
+ * [positionMs]/[durationMs] are in the media timeline; [PlaybackInfo.ended] reflects ExoPlayer
+ * STATE_ENDED.
  */
 data class PlaybackInfo(
     val playing: Boolean,

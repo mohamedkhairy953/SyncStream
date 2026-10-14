@@ -358,7 +358,7 @@ val mediaSession: MediaSession
 
 val playback: StateFlow<PlaybackInfo>    // playing, positionMs, durationMs, ended
 
-fun setMediaUri(uri: Uri)                // OpenDocument uri (persistable permission already taken)
+fun setMediaUri(uri: Uri)                // OpenDocument uri; loads PAUSED at 0 (playWhenReady=false)
 fun play()
 fun pause()
 fun seekTo(positionMs: Long)
@@ -366,6 +366,7 @@ fun currentPositionMs(): Long
 fun durationMs(): Long
 fun isPlaying(): Boolean
 fun setLoop(enabled: Boolean)            // STATE_ENDED -> seek-to-0 + caller broadcasts Seek
+fun refresh()                            // re-sample the live state into playback (main thread)
 fun release()
 ```
 ```kotlin
@@ -379,6 +380,9 @@ data class PlaybackInfo(
 Behavior: build `ExoPlayer` with a `DefaultAudioSink` chain containing `pcmTap` (Tee/custom
 AudioProcessor). `onVideoSizeChanged -> videoSource.setTextureSize(w,h)`. Surface set via
 `player.setVideoSurface(videoSource.surface)`. STATE_ENDED surfaces through `playback.ended`.
+`playback.playing` is the playback intent (playWhenReady, not suppressed, READY or BUFFERING) and
+is republished on every isPlaying / playWhenReady / suppression change, so ExoPlayer's own pauses
+(audio focus, becoming-noisy, MediaSession media buttons, end) reach it too.
 
 ### `PcmTapProcessor`
 ```kotlin
@@ -509,9 +513,9 @@ class MasterStreamingService : LifecycleService() {
     val notificationsDenied: StateFlow<Boolean>
 
     // ---- Commands from UI ----
-    fun setMediaUri(uri: Uri)
-    fun startStreaming()                          // start FGS, NSD register, Ktor start, wakelocks
-    fun play(); fun pause(); fun seekTo(positionMs: Long)
+    fun setMediaUri(uri: Uri)                     // load paused at 0 + broadcast Seek(0)
+    fun startStreaming()                          // start FGS, NSD register, Ktor start, wakelocks; no-op once live
+    fun play(); fun pause(); fun seekTo(positionMs: Long)   // main thread
     fun setLoop(enabled: Boolean)
     fun stopStreaming()                           // teardown in strict reverse order (see below)
 }
@@ -520,7 +524,11 @@ Teardown order (strict): NSD unregister -> `Bye` to all -> close DataChannels ->
 each -> stop Ktor -> `player.release()` -> `videoSource.release()`. EglBase + factory stay
 app-scoped (never released here). Wires: `SignalingServer.Callbacks` -> `MasterPeerManager`;
 `MasterPeerManager.Callbacks` cmd/ping/audio channel opens -> `SyncEngine`/`ClockSync`/
-`AudioStreamer`; `PcmTapProcessor.setOnChunk` -> `AudioStreamer.onPcmChunk`. Registers
+`AudioStreamer`; `PcmTapProcessor.setOnChunk` -> `AudioStreamer.onPcmChunk`. Every
+`playback.playing` transition (whatever caused it) is broadcast as `Play`/`Pause` with the
+position at the transition, and `End` once per end; `play()`/`pause()` only drive the player.
+Guest requests (`SyncEngine.Callbacks`, called on the WebRTC thread) are posted to the main thread.
+The 1 s heartbeat calls `MasterPlayerController.refresh()` on main and broadcasts that snapshot. Registers
 `PowerManager.OnThermalStatusChangedListener`: SEVERE -> `videoSource.adaptOutputFormat(960,540,24)`
 + set `thermalWarning`. FGS startup: requires POST_NOTIFICATIONS; if denied, set
 `notificationsDenied` (UI shows banner + stop control).
@@ -636,9 +644,9 @@ class MasterViewModel(app: Application) : AndroidViewModel(app) {
 
     fun bind()
     fun unbind()
-    fun onMediaPicked(uri: Uri)          // takePersistableUriPermission + service.setMediaUri
+    fun onMediaPicked(uri: Uri)          // takePersistableUriPermission + service.setMediaUri (loads paused)
     fun playRecent(recent: RecentVideo)  // re-select a video from recentVideos
-    fun startStreaming()
+    fun startStreaming()                 // idempotent; does not reload media
     fun stopStreaming()
     fun play(); fun pause(); fun seekTo(positionMs: Long)
     fun setLoop(enabled: Boolean)

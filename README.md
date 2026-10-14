@@ -77,9 +77,10 @@ plugins, and the dependency direction is acyclic (enforced by the module graph).
 Run the app on two or more devices on the same network.
 
 - **Host:** on Home tap **Host a room**, then **pick a video** (or choose from recents). The room is
-  live straight away; the **invite sheet** opens automatically while no guest has joined, showing
-  the 4-digit **room code**, the join QR and the guest list, with **Play for everyone** and
-  **End room**. Backing out of the full-screen player returns to the picker with the room still
+  live straight away. A picked video loads **paused** at the start (its first frame is already
+  streamed to guests); the host starts it for everyone with **Play for everyone** or the play
+  button. The **invite sheet** opens automatically while no guest has joined, showing the 4-digit
+  **room code**, the join QR and the guest list, with **Play for everyone** and **End room**. Backing out of the full-screen player returns to the picker with the room still
   live; **End room** stops hosting and returns to Home.
 - **Guest:** Home lists **Rooms nearby** live. Tap one and type its 4-digit code; or tap **Enter
   code** to try the code against every room on the network; or tap **Scan QR** (hidden when the
@@ -87,6 +88,8 @@ Run the app on two or more devices on the same network.
 - **Watching:** the guest watch screen shows a **Synced** pill, a sound toggle (muted by default)
   and auto-hiding transport controls with a speed menu. Everyone can control playback for all
   participants; playback stays frame-aligned to the host and the screen stays awake while playing.
+  If the host's player pauses on its own (a call or other media taking audio focus, headphones
+  unplugged, a media button), guests pause with it.
 
 > Works over any shared LAN — including one phone's own **Wi-Fi hotspot** with no internet (the
 > master can host the hotspot itself). All media stays on the local network via host ICE candidates

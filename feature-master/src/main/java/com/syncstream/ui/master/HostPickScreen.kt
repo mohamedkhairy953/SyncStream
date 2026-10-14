@@ -44,7 +44,8 @@ import com.syncstream.ui.theme.SyncSpacing
 /**
  * Host "Pick a video" screen. Binds [com.syncstream.service.MasterStreamingService] (via the
  * ViewModel), which makes the room live so guests can join while the host chooses. Choosing a
- * recent video or a file from the picker starts playback and calls [onVideoChosen]; leaving asks
+ * recent video or a file from the picker loads it paused and calls [onVideoChosen] (the host
+ * starts playback from the player); leaving asks
  * for confirmation and ends the room via [onEndRoom].
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -82,7 +83,6 @@ fun HostPickScreen(
     ) { uri ->
         uri?.let {
             viewModel.onMediaPicked(it)
-            viewModel.startStreaming()
             onVideoChosen()
         }
     }
@@ -163,7 +163,6 @@ fun HostPickScreen(
                 items(recentVideos, key = { it.uri }) { recent ->
                     VideoThumbnail(recent.name, null, onClick = {
                         viewModel.playRecent(recent)
-                        viewModel.startStreaming()
                         onVideoChosen()
                     })
                 }

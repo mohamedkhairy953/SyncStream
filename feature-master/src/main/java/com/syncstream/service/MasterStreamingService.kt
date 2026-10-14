@@ -11,7 +11,9 @@ import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Binder
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -74,10 +76,18 @@ class MasterStreamingService : LifecycleService() {
     // ---- App-scoped primitives (never released here) ----
     private val container by lazy { applicationContext.appContainer }
 
-    /** Service-scoped supervisor; cancelled on teardown. Distinct from the app scope. */
+    /**
+     * Service-scoped supervisor; cancelled on teardown. A CHILD of the app scope's job: the job is
+     * added last so it overrides the app scope's own job (which would otherwise make
+     * `serviceScope.cancel()` in [onDestroy] cancel the whole app scope).
+     */
     private val serviceScope: CoroutineScope by lazy {
-        CoroutineScope(SupervisorJob() + container.appScope.coroutineContext)
+        val app = container.appScope.coroutineContext
+        CoroutineScope(app + SupervisorJob(app[Job]))
     }
+
+    /** ExoPlayer may only be touched on the main thread (it was built there). */
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     // ---- Core objects, created on startStreaming ----
     private var webRtcCore: WebRtcCore? = null
@@ -160,20 +170,25 @@ class MasterStreamingService : LifecycleService() {
 
     // ---- Commands from UI ----
 
+    /**
+     * Loads [uri] paused at 0 (see [MasterPlayerController.setMediaUri]). If the room isn't live
+     * yet it is kept and loaded by [startStreaming]. Guests are told to jump to 0; the Pause for a
+     * previously-playing item is broadcast by the playback observer.
+     */
     fun setMediaUri(uri: Uri) {
         pendingUri = uri
-        playerController?.setMediaUri(uri)
+        val pc = playerController ?: return
+        pc.setMediaUri(uri)
+        syncEngine?.broadcastSeek(0L)
     }
 
     /**
      * Brings the service to the foreground, composes the runtime in dependency order, registers
-     * NSD, starts Ktor, and acquires the wake/wifi locks. Idempotent.
+     * NSD, starts Ktor, and acquires the wake/wifi locks. Idempotent: once live it does nothing
+     * (in particular it does NOT reload the media; [setMediaUri] does that exactly once).
      */
     fun startStreaming() {
-        if (started) {
-            pendingUri?.let { playerController?.setMediaUri(it) }
-            return
-        }
+        if (started) return
         started = true
 
         // Foreground notification first (FGS requirement). POST_NOTIFICATIONS denial only affects
@@ -226,21 +241,23 @@ class MasterStreamingService : LifecycleService() {
 
         val sync = SyncEngine(serviceScope)
         syncEngine = sync
+        // Guest requests arrive on the WebRTC signaling thread; ExoPlayer throws if touched off
+        // the main thread, so hop there before acting on them.
         sync.setMasterCallbacks(object : SyncEngine.Callbacks {
             override fun onClientPlay(positionMs: Long) {
-                play()
+                mainHandler.post { play() }
             }
 
             override fun onClientPause(positionMs: Long) {
-                pause()
+                mainHandler.post { pause() }
             }
 
             override fun onClientSeek(positionMs: Long) {
-                seekTo(positionMs)
+                mainHandler.post { seekTo(positionMs) }
             }
 
             override fun onClientSpeed(speed: Float) {
-                setSpeed(speed)
+                mainHandler.post { setSpeed(speed) }
             }
         })
 
@@ -277,15 +294,12 @@ class MasterStreamingService : LifecycleService() {
             while (isActive) {
                 delay(HEARTBEAT_MS)
                 val pc = playerController ?: continue
-                // ExoPlayer may only be touched on the main thread (it was built there). Snapshot
-                // the live playback state on main, then broadcast off it.
+                // ExoPlayer may only be touched on the main thread (it was built there). Re-sample
+                // the live state on main (this also refreshes [playback] for the host UI, so it can
+                // never stay stale for more than a tick), then broadcast off it.
                 val snapshot = withContext(Dispatchers.Main) {
-                    PlaybackInfo(
-                        playing = pc.isPlaying(),
-                        positionMs = pc.currentPositionMs(),
-                        durationMs = pc.durationMs(),
-                        ended = false,
-                    )
+                    pc.refresh()
+                    pc.playback.value
                 }
                 syncEngine?.broadcastState(
                     playing = snapshot.playing,
@@ -297,16 +311,15 @@ class MasterStreamingService : LifecycleService() {
         }
     }
 
+    // play()/pause() only drive the player. The resulting transition, like every other one
+    // (audio focus, becoming-noisy, media buttons, end), reaches the UI through
+    // [MasterPlayerController.playback] and is broadcast to guests by [observePlayback].
     fun play() {
-        val pc = playerController ?: return
-        pc.play()
-        syncEngine?.broadcastPlay(pc.currentPositionMs())
+        playerController?.play()
     }
 
     fun pause() {
-        val pc = playerController ?: return
-        pc.pause()
-        syncEngine?.broadcastPause(pc.currentPositionMs())
+        playerController?.pause()
     }
 
     fun seekTo(positionMs: Long) {
@@ -319,11 +332,13 @@ class MasterStreamingService : LifecycleService() {
     }
 
     fun setSpeed(speed: Float) {
-        playerController?.setSpeed(speed)
+        val pc = playerController ?: return
+        pc.setSpeed(speed)
+        val info = pc.playback.value
         syncEngine?.broadcastState(
-            playing = playerController?.isPlaying() ?: false,
-            positionMs = playerController?.currentPositionMs() ?: 0L,
-            durationMs = playerController?.durationMs() ?: 0L,
+            playing = info.playing,
+            positionMs = info.positionMs,
+            durationMs = info.durationMs,
             speed = speed,
         )
     }
@@ -463,14 +478,30 @@ class MasterStreamingService : LifecycleService() {
 
     // ---- Playback observation ----
 
+    /**
+     * Mirrors the controller's playback into [playback] (host UI) and turns every play/pause
+     * transition into a Play/Pause broadcast carrying the position at the transition, whatever
+     * caused it (host or guest request, audio-focus loss, becoming-noisy, a media button, the end
+     * of the video), so guests never wait for the next heartbeat to stop or start. End is sent
+     * once per end.
+     */
     private fun observePlayback() {
         val pc = playerController ?: return
         serviceScope.launch {
+            var wasPlaying = pc.playback.value.playing
+            var wasEnded = pc.playback.value.ended
             pc.playback.collect { info ->
                 _playback.value = info
-                if (info.ended) {
-                    syncEngine?.broadcastEnd()
+                val sync = syncEngine
+                if (info.playing != wasPlaying) {
+                    wasPlaying = info.playing
+                    when {
+                        info.playing -> sync?.broadcastPlay(info.positionMs)
+                        !info.ended -> sync?.broadcastPause(info.positionMs)
+                    }
                 }
+                if (info.ended && !wasEnded) sync?.broadcastEnd()
+                wasEnded = info.ended
             }
         }
         val nsd = advertiser ?: return
