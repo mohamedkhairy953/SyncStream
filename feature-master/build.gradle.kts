@@ -14,6 +14,7 @@ dependencies {
     implementation(project(":sync"))
     implementation(project(":webrtc"))
     implementation(project(":player"))
+    implementation(project(":design"))
 
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
