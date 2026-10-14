@@ -18,6 +18,8 @@ webrtc = "144.7559.09"
 zxingCore = "3.5.3"
 zxingEmbedded = "4.3.0"
 
+junit = "4.13.2"
+
 [libraries]
 # AndroidX core / lifecycle
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -62,6 +64,10 @@ webrtc-android = { group = "io.github.webrtc-sdk", name = "android", version.ref
 # QR — master generates (pure-Java core), client scans (camera view)
 zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxingCore" }
 zxing-android-embedded = { group = "com.journeyapps", name = "zxing-android-embedded", version.ref = "zxingEmbedded" }
+
+# Unit tests
+junit = { group = "junit", name = "junit", version.ref = "junit" }
+kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
