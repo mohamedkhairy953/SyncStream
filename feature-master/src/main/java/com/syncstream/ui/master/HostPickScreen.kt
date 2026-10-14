@@ -6,6 +6,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -100,14 +101,18 @@ fun HostPickScreen(
                 },
                 title = { Text("Pick a video") },
                 actions = {
-                    if (pin.isNotEmpty()) {
-                        RoomChip(pin, onClick = { showInvite = true })
-                    } else {
-                        Text(
-                            "Going live…",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                    // End inset so the chip / status text sits inside the bar instead of touching
+                    // the screen edge.
+                    Box(Modifier.padding(end = SyncSpacing.l)) {
+                        if (pin.isNotEmpty()) {
+                            RoomChip(pin, onClick = { showInvite = true })
+                        } else {
+                            Text(
+                                "Going live…",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
                 },
             )
