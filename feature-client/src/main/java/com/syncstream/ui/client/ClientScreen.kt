@@ -104,8 +104,30 @@ fun ClientScreen(viewModel: ClientViewModel, onLeave: () -> Unit) {
         onDispose { view.keepScreenOn = false }
     }
 
+    // ---- Connection phases ----
+    var wasConnected by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(connection) {
+        if (connection is ConnectionState.Connected) wasConnected = true
+    }
+    val terminal: Pair<String, String>? = when {
+        connection is ConnectionState.Rejected -> {
+            val reason = (connection as ConnectionState.Rejected).reason
+            "Couldn't join $label" to when (RoomCodeMatcher.classifyRejection(reason)) {
+                AttemptResult.WrongCode -> "The room code was wrong."
+                else -> "That room is full (4 guests)."
+            }
+        }
+        peerState == PeerState.CLOSED -> "The host ended the room" to "The streaming session has ended."
+        else -> null
+    }
+    val connected = connection is ConnectionState.Connected
+
+    // Live playback controls only make sense in a live room. In a terminal state (ended / couldn't
+    // join) the bars keep just the back arrow, and they never auto-hide so it stays reachable.
+    val live = terminal == null
+
     // ---- Overlay + first-use hint ----
-    val overlay = rememberOverlayVisibility(playhead.playing)
+    val overlay = rememberOverlayVisibility(playhead.playing && live)
     var hintShown by rememberSaveable { mutableStateOf(false) }
     var hintVisible by remember { mutableStateOf(false) }
     LaunchedEffect(hintVisible) {
@@ -126,28 +148,10 @@ fun ClientScreen(viewModel: ClientViewModel, onLeave: () -> Unit) {
         if (playhead.playing) viewModel.pause() else viewModel.play()
     }
 
-    // ---- Connection phases ----
-    var wasConnected by rememberSaveable { mutableStateOf(false) }
-    LaunchedEffect(connection) {
-        if (connection is ConnectionState.Connected) wasConnected = true
-    }
-    val terminal: Pair<String, String>? = when {
-        connection is ConnectionState.Rejected -> {
-            val reason = (connection as ConnectionState.Rejected).reason
-            "Couldn't join $label" to when (RoomCodeMatcher.classifyRejection(reason)) {
-                AttemptResult.WrongCode -> "The room code was wrong."
-                else -> "That room is full (4 guests)."
-            }
-        }
-        peerState == PeerState.CLOSED -> "The host ended the room" to "The streaming session has ended."
-        else -> null
-    }
-    val connected = connection is ConnectionState.Connected
-
     PlayerOverlayScaffold(
         visible = overlay.visible,
         onTap = {
-            if (overlay.visible) {
+            if (overlay.visible && live) {
                 onControl()
                 togglePlayPause()
             } else {
@@ -162,10 +166,15 @@ fun ClientScreen(viewModel: ClientViewModel, onLeave: () -> Unit) {
             IconButton(onClick = leave) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Leave room", tint = SyncTheme.colors.onScrim)
             }
-            if (connected && latencyMs > 0) {
-                StatusPill("Synced · $latencyMs ms", tone = StatusTone.Success)
-            } else {
-                StatusPill("Syncing…", tone = StatusTone.Warning)
+            if (!live) return@PlayerOverlayScaffold
+            // Sync status only while connected: when connecting / reconnecting the centre message
+            // is the single source of truth, so a "Syncing…" pill would just repeat it.
+            if (connected) {
+                if (latencyMs > 0) {
+                    StatusPill("Synced · $latencyMs ms", tone = StatusTone.Success)
+                } else {
+                    StatusPill("Syncing…", tone = StatusTone.Warning)
+                }
             }
             Spacer(Modifier.weight(1f))
             SoundPill(muted = muted, onToggle = { overlay.poke(); viewModel.setMuted(!muted) })
@@ -173,6 +182,7 @@ fun ClientScreen(viewModel: ClientViewModel, onLeave: () -> Unit) {
             SpeedMenu(speed = playhead.speed, onSetSpeed = { onControl(); viewModel.setSpeed(it) })
         },
         bottomBar = {
+            if (!live) return@PlayerOverlayScaffold
             val position = rememberTickedPosition(playhead)
             SeekBar(
                 positionMs = position,
