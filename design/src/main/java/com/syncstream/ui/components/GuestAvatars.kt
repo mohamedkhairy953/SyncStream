@@ -17,7 +17,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.syncstream.ui.theme.SyncTheme
-import kotlin.math.abs
 
 private val AvatarSize = 24.dp
 private val AvatarOverlap = (-6).dp
@@ -28,7 +27,7 @@ private const val MAX_SHOWN = 4
 fun GuestAvatar(name: String, modifier: Modifier = Modifier) {
     val palette = listOf(MaterialTheme.colorScheme.secondary, SyncTheme.colors.warning, MaterialTheme.colorScheme.primary)
     val letter = name.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?"
-    AvatarCircle(letter, palette[abs(name.hashCode()) % 3], modifier)
+    AvatarCircle(letter, palette[name.hashCode().mod(3)], modifier)
 }
 
 @Composable

@@ -25,6 +25,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -34,6 +35,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -47,7 +49,7 @@ private val SPEED_OPTIONS = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
 
 /** Seek slider with elapsed / total timecodes below. Reports the final value on release. */
 @Composable
-fun SeekBar(positionMs: Long, durationMs: Long, onSeek: (Long) -> Unit, modifier: Modifier = Modifier) {
+fun SeekBar(positionMs: Long, durationMs: Long, onSeek: (Long) -> Unit, modifier: Modifier = Modifier, onScrub: () -> Unit = {}) {
     val colors = SyncTheme.colors
     var dragging by remember { mutableStateOf(false) }
     var dragValue by remember { mutableStateOf(0f) }
@@ -56,7 +58,8 @@ fun SeekBar(positionMs: Long, durationMs: Long, onSeek: (Long) -> Unit, modifier
     Column(modifier.fillMaxWidth()) {
         Slider(
             value = shown,
-            onValueChange = { dragging = true; dragValue = it },
+            onValueChange = { dragging = true; dragValue = it; onScrub() },
+            enabled = durationMs > 0,
             onValueChangeFinished = { dragging = false; onSeek(dragValue.toLong()) },
             valueRange = 0f..max,
             colors = SliderDefaults.colors(
@@ -96,7 +99,7 @@ fun TransportControls(
                 .size(PlayDiscSize)
                 .clip(CircleShape)
                 .background(colors.onScrim)
-                .clickable(onClick = onPlayPause),
+                .clickable(role = Role.Button, onClick = onPlayPause),
             contentAlignment = Alignment.Center,
         ) {
             Icon(
@@ -121,9 +124,10 @@ fun SpeedMenu(speed: Float, onSetSpeed: (Float) -> Unit, modifier: Modifier = Mo
     Box(modifier) {
         Box(
             Modifier
+                .minimumInteractiveComponentSize()
                 .clip(SyncShapes.pill)
                 .background(colors.scrimPill)
-                .clickable { expanded = true }
+                .clickable(role = Role.Button) { expanded = true }
                 .padding(horizontal = SyncSpacing.m, vertical = SyncSpacing.s),
         ) {
             Text(

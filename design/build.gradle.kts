@@ -12,5 +12,5 @@ android {
 
 dependencies {
     implementation(libs.zxing.core)
-    api(libs.androidx.compose.material.icons.extended) // icons appear in component params
+    implementation(libs.androidx.compose.material.icons.extended)
 }

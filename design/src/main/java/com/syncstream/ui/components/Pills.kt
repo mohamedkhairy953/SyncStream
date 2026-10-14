@@ -15,12 +15,14 @@ import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.syncstream.ui.theme.SyncShapes
@@ -37,9 +39,10 @@ private val DotSize = 6.dp
 fun RoomChip(code: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
     Row(
         modifier
+            .minimumInteractiveComponentSize()
             .clip(SyncShapes.pill)
             .background(SyncTheme.colors.scrimPill)
-            .clickable(onClick = onClick)
+            .clickable(role = Role.Button, onClick = onClick)
             .padding(horizontal = SyncSpacing.m, vertical = SyncSpacing.s),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(SyncSpacing.xs),
@@ -70,7 +73,7 @@ fun StatusPill(
         StatusTone.Warning -> colors.warning
     }
     val background = if (tone == StatusTone.Neutral) colors.scrimPill else accent.copy(alpha = 0.18f)
-    val clickable = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
+    val clickable = if (onClick != null) Modifier.minimumInteractiveComponentSize().clickable(role = Role.Button, onClick = onClick) else Modifier
     Row(
         modifier
             .clip(SyncShapes.pill)

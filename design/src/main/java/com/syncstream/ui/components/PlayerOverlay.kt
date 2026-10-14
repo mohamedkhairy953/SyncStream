@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -74,7 +76,7 @@ fun PlayerOverlayScaffold(
                 Modifier
                     .fillMaxWidth()
                     .background(Brush.verticalGradient(listOf(scrim, Color.Transparent)))
-                    .windowInsetsPadding(WindowInsets.systemBars)
+                    .windowInsetsPadding(WindowInsets.systemBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
                     .padding(horizontal = SyncSpacing.s, vertical = SyncSpacing.s),
                 verticalAlignment = Alignment.CenterVertically,
                 content = topBar,
@@ -90,7 +92,7 @@ fun PlayerOverlayScaffold(
                 Modifier
                     .fillMaxWidth()
                     .background(Brush.verticalGradient(listOf(Color.Transparent, scrim)))
-                    .windowInsetsPadding(WindowInsets.systemBars)
+                    .windowInsetsPadding(WindowInsets.systemBars.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
                     .padding(horizontal = SyncSpacing.l, vertical = SyncSpacing.s),
                 content = bottomBar,
             )
