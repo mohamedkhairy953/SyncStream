@@ -683,13 +683,16 @@ stopping the room; `onEndRoom` ends it (the caller stops streaming and pops to `
 ```kotlin
 data class RoomTarget(val host: String, val port: Int, val label: String)
 enum class AttemptResult { Accepted, WrongCode, RoomFull, Unreachable }
-sealed interface MatchResult { Joined(room), WrongCode, RoomFull(room), NoMatch, NoRooms }
+sealed interface MatchResult { Joined(room), WrongCode, RoomFull(room), Unreachable(room), NoMatch, NoRooms }
 object RoomCodeMatcher {
     suspend fun match(rooms: List<RoomTarget>, attempt: suspend (RoomTarget) -> AttemptResult): MatchResult
     fun classifyRejection(reason: String?): AttemptResult
 }
 ```
-Pure and unit-tested: tries the code against each room in order, first acceptor wins.
+Pure and unit-tested: tries the code against each room in order, first acceptor wins. With a
+single room the specific failure is reported (`WrongCode`, `RoomFull(room)`, or `Unreachable(room)`
+when the host couldn't be reached at all, so the code was never checked); several rooms with no
+acceptor give `NoMatch`.
 
 ### `NearbyRoomsSection`
 ```kotlin

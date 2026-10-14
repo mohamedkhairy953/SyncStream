@@ -11,6 +11,8 @@ sealed interface MatchResult {
     /** A single chosen room rejected the code. */
     data object WrongCode : MatchResult
     data class RoomFull(val room: RoomTarget) : MatchResult
+    /** A single chosen room could not be reached at all, so the code was never checked. */
+    data class Unreachable(val room: RoomTarget) : MatchResult
     /** Several rooms were tried and none accepted the code. */
     data object NoMatch : MatchResult
     data object NoRooms : MatchResult
@@ -19,7 +21,8 @@ sealed interface MatchResult {
 /**
  * Tries a room code against candidate rooms in order; the first room that accepts wins.
  * With exactly one candidate the specific failure is reported, so the UI can say
- * "Wrong code" or "Room is full" instead of the generic "No room with that code nearby".
+ * "Wrong code", "Room is full" or "Couldn't reach" instead of the generic "No room with that
+ * code nearby".
  */
 object RoomCodeMatcher {
     /**
@@ -40,7 +43,8 @@ object RoomCodeMatcher {
             return when (last) {
                 AttemptResult.WrongCode -> MatchResult.WrongCode
                 AttemptResult.RoomFull -> MatchResult.RoomFull(rooms.single())
-                else -> MatchResult.NoMatch
+                AttemptResult.Unreachable -> MatchResult.Unreachable(rooms.single())
+                AttemptResult.Accepted -> MatchResult.Joined(rooms.single()) // not reached: Accepted returns in the loop
             }
         }
         return MatchResult.NoMatch

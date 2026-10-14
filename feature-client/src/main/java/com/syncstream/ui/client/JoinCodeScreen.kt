@@ -210,7 +210,8 @@ fun JoinCodeScreen(
                 modifier = Modifier.widthIn(max = KeypadMaxWidth).fillMaxWidth(),
             )
 
-            val noRoom = result == MatchResult.NoMatch || result == MatchResult.NoRooms
+            val noRoom = result == MatchResult.NoMatch || result == MatchResult.NoRooms ||
+                result is MatchResult.Unreachable
             if (noRoom) {
                 SecondaryButton("Trouble connecting?", onClick = { showManual = true }, enabled = !busy)
             } else {
@@ -248,6 +249,13 @@ private fun StatusLine(busy: Boolean, result: MatchResult?) {
                 Text("Wrong code, try again", style = MaterialTheme.typography.bodyMedium, color = error)
             result is MatchResult.RoomFull ->
                 Text("That room is full (4 guests)", style = MaterialTheme.typography.bodyMedium, color = error)
+            result is MatchResult.Unreachable ->
+                Text(
+                    "Couldn't reach ${result.room.label}. Check both devices are on the same Wi-Fi.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = error,
+                    textAlign = TextAlign.Center,
+                )
             result == MatchResult.NoMatch || result == MatchResult.NoRooms ->
                 Text("No room with that code nearby", style = MaterialTheme.typography.bodyMedium, color = error)
         }
