@@ -3,115 +3,88 @@ package com.syncstream.ui.master
 import android.app.Activity
 import android.view.ViewGroup
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.Box
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Forward10
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Repeat
-import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material.icons.outlined.People
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.syncstream.ui.components.GuestAvatarRow
+import com.syncstream.ui.components.PlayerOverlayScaffold
+import com.syncstream.ui.components.RoomChip
+import com.syncstream.ui.components.SeekBar
+import com.syncstream.ui.components.SpeedMenu
+import com.syncstream.ui.components.StatusPill
+import com.syncstream.ui.components.StatusTone
+import com.syncstream.ui.components.TransportControls
+import com.syncstream.ui.components.rememberOverlayVisibility
+import com.syncstream.ui.theme.SyncTheme
 import kotlinx.coroutines.delay
 import org.webrtc.RendererCommon
 import org.webrtc.SurfaceViewRenderer
 
 /**
- * Full-screen Netflix/Prime-style master video player. Shares the same [MasterViewModel] instance
- * as [MasterScreen] (scoped to the masterGraph back-stack entry) so the streaming session keeps
- * running while this screen is shown.
+ * Full-screen host video player built on [PlayerOverlayScaffold]. Shares the same [MasterViewModel]
+ * instance as [HostPickScreen] (scoped to the masterGraph back-stack entry) so the streaming
+ * session keeps running while this screen is shown.
  *
  * Interaction model (standard video-player behaviour):
- * - Controls (top bar + bottom panel + centre glyph) auto-hide after a few seconds of no
- *   interaction while playing, and stay visible while paused.
- * - Tapping while controls are hidden reveals them (without toggling playback); tapping while
- *   they are shown toggles play/pause. Any interaction restarts the auto-hide timer.
- * - Immersive display (system bars hidden, screen kept awake); hardware-back returns to setup
- *   without stopping the session.
+ * - Overlays auto-hide after a few seconds of no interaction while playing, and stay visible while
+ *   paused.
+ * - Tapping while overlays are hidden reveals them (without toggling playback); tapping while they
+ *   are shown toggles play/pause. Any interaction restarts the auto-hide timer.
+ * - Immersive display (system bars hidden, screen kept awake); hardware-back returns to the video
+ *   picker without ending the room.
+ * - The invite sheet opens automatically the first time the player opens with no guests and
+ *   nothing playing.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MasterPlayerScreen(
     viewModel: MasterViewModel,
     onBack: () -> Unit,
-    onStopHosting: () -> Unit,
+    onEndRoom: () -> Unit,
 ) {
     val bound by viewModel.bound.collectAsStateWithLifecycle()
     val pin by viewModel.pin.collectAsStateWithLifecycle()
     val clients by viewModel.clients.collectAsStateWithLifecycle()
     val playback by viewModel.playback.collectAsStateWithLifecycle()
-    val selectedUri by viewModel.selectedUri.collectAsStateWithLifecycle()
     val thermalWarning by viewModel.thermalWarning.collectAsStateWithLifecycle()
     val loop by viewModel.loop.collectAsStateWithLifecycle()
     val speed by viewModel.speed.collectAsStateWithLifecycle()
     val endpoint by viewModel.endpoint.collectAsStateWithLifecycle()
-    val recentVideos by viewModel.recentVideos.collectAsStateWithLifecycle()
 
-    var showQr by remember { mutableStateOf(false) }
-    var showRecents by remember { mutableStateOf(false) }
+    var showInvite by remember { mutableStateOf(false) }
+    var autoInviteShown by rememberSaveable { mutableStateOf(false) }
 
     // Self-heal: if the service somehow isn't bound, bind it (idempotent). Reading the bound state
     // below makes eglContext/videoSource (plain getters) refresh once the service connects.
@@ -120,10 +93,13 @@ fun MasterPlayerScreen(
     val eglContext = viewModel.eglContext
     val videoSource = viewModel.videoSource
 
-    // ---- File picker for "Select video" ----
-    val openDocumentLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocument(),
-    ) { uri -> uri?.let(viewModel::onMediaPicked) }
+    // Auto-open the invite on first composition when nobody has joined and nothing is playing.
+    LaunchedEffect(Unit) {
+        if (!autoInviteShown && clients.isEmpty() && !playback.playing) {
+            autoInviteShown = true
+            showInvite = true
+        }
+    }
 
     // ---- Immersive + keep-awake ----
     val view = LocalView.current
@@ -141,10 +117,10 @@ fun MasterPlayerScreen(
         }
     }
 
-    // ---- Hardware back -> setup, keep hosting ----
+    // ---- Hardware back -> video picker, keep hosting ----
     BackHandler { onBack() }
 
-    // Reads the live state at tap time (not a value captured into pointerInput's lambda).
+    // Reads the live state at tap time (not a value captured into a long-lived lambda).
     val togglePlayPause = {
         val pb = viewModel.playback.value
         when {
@@ -154,326 +130,15 @@ fun MasterPlayerScreen(
         }
     }
 
-    // ---- Auto-hiding controls ----
-    // controlsVisible drives every overlay's visibility. interactionNonce is bumped on each user
-    // action to restart the auto-hide timer below (keyed on it). Controls stay up while paused.
-    var controlsVisible by remember { mutableStateOf(true) }
-    var interactionNonce by remember { mutableIntStateOf(0) }
-    val keepControlsAlive: () -> Unit = { interactionNonce++ }
-    LaunchedEffect(controlsVisible, playback.playing, interactionNonce) {
-        if (controlsVisible && playback.playing) {
-            delay(3500)
-            controlsVisible = false
-        }
-    }
+    // Overlays stay up while paused; while playing they auto-hide, restarted by every poke().
+    val overlay = rememberOverlayVisibility(playback.playing)
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black)
-            // Hidden controls: tap reveals them. Shown controls: tap toggles play/pause.
-            // Either way, restart the auto-hide timer.
-            .pointerInput(Unit) {
-                detectTapGestures {
-                    if (controlsVisible) togglePlayPause() else controlsVisible = true
-                    interactionNonce++
-                }
-            },
-    ) {
-        // ---- Video layer ----
-        if (eglContext == null || videoSource == null) {
-            Text(
-                "Preparing stream…",
-                color = Color.White.copy(alpha = 0.85f),
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.align(Alignment.Center),
-            )
-        } else {
-            // Aspect ratio of the actual decoded video (w/h after display rotation). 0 until the
-            // first frame's resolution is known. Reported by the renderer's onFrameResolutionChanged.
-            var videoAspect by remember { mutableFloatStateOf(0f) }
-            val holder = remember { object { var view: SurfaceViewRenderer? = null } }
-
-            BoxWithConstraints(Modifier.fillMaxSize()) {
-                // Letterbox/pillarbox: size the surface to the video aspect and centre it on black,
-                // always fitting inside the current screen bounds (recomputed on rotation).
-                val screenAspect = maxWidth / maxHeight
-                val surfaceModifier = when {
-                    videoAspect <= 0f -> Modifier.fillMaxSize()
-                    videoAspect >= screenAspect -> Modifier.fillMaxWidth().aspectRatio(videoAspect)
-                    else -> Modifier.fillMaxHeight().aspectRatio(videoAspect)
-                }
-                AndroidView(
-                    modifier = surfaceModifier.align(Alignment.Center),
-                    factory = { ctx ->
-                        SurfaceViewRenderer(ctx).apply {
-                            layoutParams = ViewGroup.LayoutParams(
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                            )
-                            init(
-                                eglContext,
-                                object : RendererCommon.RendererEvents {
-                                    override fun onFirstFrameRendered() {}
-                                    override fun onFrameResolutionChanged(w: Int, h: Int, rotation: Int) {
-                                        if (w > 0 && h > 0) {
-                                            videoAspect =
-                                                if (rotation % 180 == 0) w.toFloat() / h
-                                                else h.toFloat() / w
-                                        }
-                                    }
-                                },
-                            )
-                            setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
-                            setEnableHardwareScaler(false)
-                            holder.view = this
-                            videoSource.addPreviewSink(this)
-                        }
-                    },
-                )
-            }
-            DisposableEffect(videoSource) {
-                onDispose {
-                    holder.view?.let { v ->
-                        videoSource.removePreviewSink(v)
-                        v.release()
-                    }
-                    holder.view = null
-                }
-            }
-        }
-
-        // ---- Top scrim + bar ----
-        AnimatedVisibility(
-            visible = controlsVisible,
-            enter = fadeIn(),
-            exit = fadeOut(),
-            modifier = Modifier.align(Alignment.TopCenter),
-        ) {
-            Box(Modifier.fillMaxWidth()) {
-                Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .height(120.dp)
-                        .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.7f), Color.Transparent))),
-                )
-                TopBar(
-                    title = selectedUri?.lastPathSegment ?: "No video selected",
-                    onBack = onBack,
-                    onShowQr = { keepControlsAlive(); showQr = true },
-                    onStopHosting = onStopHosting,
-                    modifier = Modifier.align(Alignment.TopStart),
-                )
-            }
-        }
-
-        // ---- Centre play glyph (only while paused and controls shown) ----
-        AnimatedVisibility(
-            visible = controlsVisible && !playback.playing,
-            enter = fadeIn(),
-            exit = fadeOut(),
-            modifier = Modifier.align(Alignment.Center),
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(76.dp)
-                    .background(Color.Black.copy(alpha = 0.45f), CircleShape)
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                    ) { keepControlsAlive(); togglePlayPause() },
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    Icons.Filled.PlayArrow,
-                    contentDescription = "Play",
-                    tint = Color.White,
-                    modifier = Modifier.size(44.dp),
-                )
-            }
-        }
-
-        // ---- Bottom scrim + control panel ----
-        AnimatedVisibility(
-            visible = controlsVisible,
-            enter = fadeIn(),
-            exit = fadeOut(),
-            modifier = Modifier.align(Alignment.BottomCenter),
-        ) {
-            Box(Modifier.fillMaxWidth()) {
-                Box(
-                    Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .height(170.dp)
-                        .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.85f)))),
-                )
-                BottomPanel(
-                    positionMs = playback.positionMs,
-                    durationMs = playback.durationMs,
-                    playing = playback.playing,
-                    loop = loop,
-                    speed = speed,
-                    pin = pin,
-                    clientCount = clients.size,
-                    thermalWarning = thermalWarning,
-                    onSeek = { keepControlsAlive(); viewModel.seekTo(it) },
-                    onRewind = { keepControlsAlive(); viewModel.seekTo((playback.positionMs - 10_000L).coerceAtLeast(0L)) },
-                    onForward = { keepControlsAlive(); viewModel.seekTo(playback.positionMs + 10_000L) },
-                    onToggleLoop = { keepControlsAlive(); viewModel.setLoop(!loop) },
-                    onSetSpeed = { keepControlsAlive(); viewModel.setSpeed(it) },
-                    onSelectVideo = { keepControlsAlive(); showRecents = true },
-                    onInteract = keepControlsAlive,
-                    modifier = Modifier.align(Alignment.BottomCenter),
-                )
-            }
-        }
-    }
-
-    if (showQr) {
-        QrJoinSheet(endpoint = endpoint, pin = pin, onDismiss = { showQr = false })
-    }
-
-    if (showRecents) {
-        RecentVideosBottomSheet(
-            recents = recentVideos,
-            onPick = { showRecents = false; viewModel.playRecent(it) },
-            onBrowse = { showRecents = false; openDocumentLauncher.launch(arrayOf("video/*")) },
-            onDismiss = { showRecents = false },
-        )
-    }
-}
-
-@Composable
-private fun TopBar(
-    title: String,
-    onBack: () -> Unit,
-    onShowQr: () -> Unit,
-    onStopHosting: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        IconButton(onClick = onBack) {
-            Icon(
-                Icons.AutoMirrored.Filled.ArrowBack,
-                contentDescription = "Back",
-                tint = Color.White,
-                modifier = Modifier.size(28.dp),
-            )
-        }
-        Text(
-            text = title,
-            color = Color.White,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f).padding(start = 4.dp),
-        )
-        IconButton(onClick = onShowQr) {
-            Icon(
-                Icons.Filled.QrCode2,
-                contentDescription = "Show join QR code",
-                tint = Color.White,
-                modifier = Modifier.size(26.dp),
-            )
-        }
-        TextButton(onClick = onStopHosting) {
-            Text("Stop hosting", color = Color(0xFFFF6B6B), fontWeight = FontWeight.SemiBold)
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun RecentVideosBottomSheet(
-    recents: List<RecentVideo>,
-    onPick: (RecentVideo) -> Unit,
-    onBrowse: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    val sheetState = rememberModalBottomSheetState()
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 24.dp)
-                .padding(bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            Text(
-                "Play a video",
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(vertical = 8.dp),
-            )
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(onClick = onBrowse)
-                    .padding(vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(Icons.Filled.VideoLibrary, contentDescription = null)
-                Spacer(Modifier.width(12.dp))
-                Text("Pick from device", style = MaterialTheme.typography.bodyLarge)
-            }
-            if (recents.isNotEmpty()) {
-                HorizontalDivider()
-                Text(
-                    "Recent",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-                recents.forEach { recent ->
-                    Text(
-                        recent.name,
-                        style = MaterialTheme.typography.bodyLarge,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onPick(recent) }
-                            .padding(vertical = 14.dp),
-                    )
-                }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun BottomPanel(
-    positionMs: Long,
-    durationMs: Long,
-    playing: Boolean,
-    loop: Boolean,
-    speed: Float,
-    pin: String,
-    clientCount: Int,
-    thermalWarning: Boolean,
-    onSeek: (Long) -> Unit,
-    onRewind: () -> Unit,
-    onForward: () -> Unit,
-    onToggleLoop: () -> Unit,
-    onSetSpeed: (Float) -> Unit,
-    onSelectVideo: () -> Unit,
-    onInteract: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val duration = durationMs.coerceAtLeast(0L)
-    val sliderMax = duration.coerceAtLeast(1L).toFloat()
-
-    var ticked by remember { mutableLongStateOf(positionMs) }
-    LaunchedEffect(positionMs, playing, duration, speed) {
-        ticked = positionMs
-        if (playing && duration > 0) {
+    // Locally interpolated position so the seek bar moves smoothly between playback updates.
+    val duration = playback.durationMs.coerceAtLeast(0L)
+    var ticked by remember { mutableLongStateOf(playback.positionMs) }
+    LaunchedEffect(playback.positionMs, playback.playing, duration, speed) {
+        ticked = playback.positionMs
+        if (playback.playing && duration > 0) {
             while (true) {
                 delay(500)
                 ticked = (ticked + (500L * speed).toLong()).coerceAtMost(duration)
@@ -481,169 +146,138 @@ private fun BottomPanel(
         }
     }
 
-    var scrubbing by remember { mutableStateOf(false) }
-    var scrubValue by remember { mutableFloatStateOf(0f) }
-    val sliderValue = if (scrubbing) scrubValue else ticked.toFloat().coerceIn(0f, sliderMax)
-
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp)
-            .padding(bottom = 18.dp),
-    ) {
-        // ---- Row 1: progress bar ----
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                formatMs(sliderValue.toLong()),
-                color = Color.White,
-                style = MaterialTheme.typography.labelMedium,
-                fontFamily = FontFamily.Monospace,
-            )
-            Slider(
-                value = sliderValue,
-                onValueChange = {
-                    scrubbing = true
-                    scrubValue = it
-                    onInteract()
-                },
-                onValueChangeFinished = {
-                    scrubbing = false
-                    onSeek(scrubValue.toLong())
-                },
-                valueRange = 0f..sliderMax,
-                enabled = duration > 0,
-                colors = SliderDefaults.colors(
-                    thumbColor = Color.White,
-                    activeTrackColor = MaterialTheme.colorScheme.primary,
-                    inactiveTrackColor = Color.White.copy(alpha = 0.3f),
-                ),
-                // No grab handle — a clean progress line.
-                thumb = {},
-                modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
-            )
-            Text(
-                formatMs(duration),
-                color = Color.White.copy(alpha = 0.7f),
-                style = MaterialTheme.typography.labelMedium,
-                fontFamily = FontFamily.Monospace,
-            )
-        }
-
-        // ---- Row 2: options (left) + information & actions (right) ----
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onRewind) {
-                    Icon(Icons.Filled.Replay10, "Rewind 10s", tint = Color.White, modifier = Modifier.size(26.dp))
-                }
-                IconButton(onClick = onForward) {
-                    Icon(Icons.Filled.Forward10, "Forward 10s", tint = Color.White, modifier = Modifier.size(26.dp))
-                }
-                IconButton(onClick = onToggleLoop) {
-                    Icon(
-                        Icons.Filled.Repeat,
-                        contentDescription = "Loop",
-                        tint = if (loop) MaterialTheme.colorScheme.primary else Color.White,
-                        modifier = Modifier.size(24.dp),
-                    )
-                }
-                SpeedButton(speed = speed, onSetSpeed = onSetSpeed)
-            }
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (pin.isNotEmpty()) {
+    PlayerOverlayScaffold(
+        visible = overlay.visible,
+        // Hidden overlays: tap reveals them. Shown overlays: tap toggles play/pause.
+        // Either way, restart the auto-hide timer.
+        onTap = {
+            if (overlay.visible) togglePlayPause()
+            overlay.poke()
+        },
+        modifier = Modifier.background(Color.Black),
+        video = {
+            if (eglContext == null || videoSource == null) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(
-                        "PIN $pin",
-                        color = Color.White.copy(alpha = 0.85f),
-                        style = MaterialTheme.typography.labelMedium,
-                        fontFamily = FontFamily.Monospace,
+                        "Preparing stream…",
+                        color = SyncTheme.colors.onScrim,
+                        style = MaterialTheme.typography.titleMedium,
                     )
-                    Spacer(Modifier.width(10.dp))
                 }
+            } else {
+                // Aspect ratio of the actual decoded video (w/h after display rotation). 0 until the
+                // first frame's resolution is known. Reported by the renderer's onFrameResolutionChanged.
+                var videoAspect by remember { mutableFloatStateOf(0f) }
+                val holder = remember { object { var view: SurfaceViewRenderer? = null } }
+
+                BoxWithConstraints(Modifier.fillMaxSize()) {
+                    // Letterbox/pillarbox: size the surface to the video aspect and centre it on black,
+                    // always fitting inside the current screen bounds (recomputed on rotation).
+                    val screenAspect = maxWidth / maxHeight
+                    val surfaceModifier = when {
+                        videoAspect <= 0f -> Modifier.fillMaxSize()
+                        videoAspect >= screenAspect -> Modifier.fillMaxWidth().aspectRatio(videoAspect)
+                        else -> Modifier.fillMaxHeight().aspectRatio(videoAspect)
+                    }
+                    AndroidView(
+                        modifier = surfaceModifier.align(Alignment.Center),
+                        factory = { ctx ->
+                            SurfaceViewRenderer(ctx).apply {
+                                layoutParams = ViewGroup.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                )
+                                init(
+                                    eglContext,
+                                    object : RendererCommon.RendererEvents {
+                                        override fun onFirstFrameRendered() {}
+                                        override fun onFrameResolutionChanged(w: Int, h: Int, rotation: Int) {
+                                            if (w > 0 && h > 0) {
+                                                videoAspect =
+                                                    if (rotation % 180 == 0) w.toFloat() / h
+                                                    else h.toFloat() / w
+                                            }
+                                        }
+                                    },
+                                )
+                                setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
+                                setEnableHardwareScaler(false)
+                                holder.view = this
+                                videoSource.addPreviewSink(this)
+                            }
+                        },
+                    )
+                }
+                DisposableEffect(videoSource) {
+                    onDispose {
+                        holder.view?.let { v ->
+                            videoSource.removePreviewSink(v)
+                            v.release()
+                        }
+                        holder.view = null
+                    }
+                }
+            }
+        },
+        topBar = {
+            IconButton(onClick = { overlay.poke(); onBack() }) {
                 Icon(
-                    Icons.Outlined.People,
-                    contentDescription = null,
-                    tint = Color.White.copy(alpha = 0.85f),
-                    modifier = Modifier.size(15.dp),
+                    Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Back",
+                    tint = SyncTheme.colors.onScrim,
                 )
-                Spacer(Modifier.width(3.dp))
-                Text(
-                    "$clientCount/4",
-                    color = Color.White.copy(alpha = 0.85f),
-                    style = MaterialTheme.typography.labelMedium,
-                )
-                if (thermalWarning) {
-                    Spacer(Modifier.width(8.dp))
-                    Icon(
-                        Icons.Filled.Warning,
-                        contentDescription = "Thermal throttling",
-                        tint = Color(0xFFF9A825),
-                        modifier = Modifier.size(15.dp),
-                    )
-                }
-                Spacer(Modifier.width(6.dp))
-                IconButton(onClick = onSelectVideo) {
-                    Icon(
-                        Icons.Filled.VideoLibrary,
-                        contentDescription = "Select another video",
-                        tint = Color.White,
-                        modifier = Modifier.size(24.dp),
-                    )
-                }
             }
-        }
-    }
-}
-
-private val SPEED_OPTIONS = floatArrayOf(0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f)
-
-@Composable
-private fun SpeedButton(speed: Float, onSetSpeed: (Float) -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    Box {
-        TextButton(onClick = { expanded = true }) {
-            Text(
-                formatSpeed(speed),
-                color = if (speed != 1f) MaterialTheme.colorScheme.primary else Color.White,
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.SemiBold,
+            if (pin.isNotEmpty()) {
+                RoomChip(pin, onClick = { overlay.poke(); showInvite = true })
+            }
+            if (thermalWarning) {
+                StatusPill("Reduced quality", tone = StatusTone.Warning, icon = Icons.Filled.Warning)
+            }
+            Spacer(Modifier.weight(1f))
+            GuestAvatarRow(clients.map { it.deviceName })
+        },
+        bottomBar = {
+            SeekBar(
+                positionMs = ticked,
+                durationMs = duration,
+                onSeek = { overlay.poke(); viewModel.seekTo(it) },
+                onScrub = overlay::poke,
             )
-        }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            SPEED_OPTIONS.forEach { option ->
-                DropdownMenuItem(
-                    text = {
-                        Text(
-                            formatSpeed(option),
-                            fontWeight = if (option == speed) FontWeight.Bold else FontWeight.Normal,
-                            color = if (option == speed) MaterialTheme.colorScheme.primary else Color.Unspecified,
+            TransportControls(
+                playing = playback.playing,
+                onPlayPause = { overlay.poke(); togglePlayPause() },
+                onRewind = { overlay.poke(); viewModel.seekTo((playback.positionMs - 10_000L).coerceAtLeast(0L)) },
+                onForward = { overlay.poke(); viewModel.seekTo(playback.positionMs + 10_000L) },
+                extra = {
+                    IconButton(onClick = { overlay.poke(); viewModel.setLoop(!loop) }) {
+                        Icon(
+                            Icons.Filled.Repeat,
+                            contentDescription = "Loop",
+                            tint = if (loop) MaterialTheme.colorScheme.primary else SyncTheme.colors.onScrim,
                         )
-                    },
-                    onClick = { onSetSpeed(option); expanded = false },
-                )
-            }
-        }
-    }
-}
+                    }
+                    SpeedMenu(speed, onSetSpeed = { overlay.poke(); viewModel.setSpeed(it) })
+                    IconButton(onClick = { overlay.poke(); onBack() }) {
+                        Icon(
+                            Icons.Filled.VideoLibrary,
+                            contentDescription = "Select another video",
+                            tint = SyncTheme.colors.onScrim,
+                        )
+                    }
+                },
+            )
+        },
+    )
 
-private fun formatSpeed(speed: Float): String {
-    return if (speed == speed.toInt().toFloat()) {
-        "${speed.toInt()}x"
-    } else {
-        "${speed}x"
+    if (showInvite) {
+        InviteSheet(
+            endpoint = endpoint,
+            pin = pin,
+            guests = clients.map { it.deviceName },
+            playing = playback.playing,
+            onPlayForEveryone = { viewModel.play(); showInvite = false },
+            onEndRoom = { showInvite = false; onEndRoom() },
+            onDismiss = { showInvite = false },
+        )
     }
-}
-
-private fun formatMs(ms: Long): String {
-    if (ms <= 0) return "0:00"
-    val totalSeconds = ms / 1000
-    val minutes = totalSeconds / 60
-    val seconds = totalSeconds % 60
-    return "%d:%02d".format(minutes, seconds)
 }

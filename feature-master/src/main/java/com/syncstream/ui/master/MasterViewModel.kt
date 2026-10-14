@@ -24,7 +24,7 @@ import kotlinx.coroutines.launch
 import org.webrtc.EglBase
 
 /**
- * Binds [MasterStreamingService] and re-exposes its [StateFlow]s to [MasterScreen]. Holds the
+ * Binds [MasterStreamingService] and re-exposes its [StateFlow]s to [HostPickScreen]. Holds the
  * [ServiceConnection] but no core WebRTC/player objects. Handles the file-picker result with a
  * persistable permission and tracks POST_NOTIFICATIONS denial via the service's flow.
  */
