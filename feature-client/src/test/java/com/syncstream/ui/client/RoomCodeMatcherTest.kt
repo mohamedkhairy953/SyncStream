@@ -43,6 +43,10 @@ class RoomCodeMatcherTest {
         assertEquals(MatchResult.Unreachable(a), RoomCodeMatcher.match(listOf(a)) { AttemptResult.Unreachable })
     }
 
+    @Test fun allUnreachableRoomsIsNoMatch() = runTest {
+        assertEquals(MatchResult.NoMatch, RoomCodeMatcher.match(listOf(a, b)) { AttemptResult.Unreachable })
+    }
+
     @Test fun noRoomsIsNoRooms() = runTest {
         assertEquals(MatchResult.NoRooms, RoomCodeMatcher.match(emptyList()) { error("not called") })
     }

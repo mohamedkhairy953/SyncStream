@@ -44,7 +44,6 @@ import kotlinx.coroutines.cancel
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -107,6 +106,9 @@ class MasterStreamingService : LifecycleService() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var heartbeatJob: Job? = null
+
+    /** Playback + advertise observers of the current session; cancelled in [stopStreaming]. */
+    private var observeJob: Job? = null
     private var thermalListener: PowerManager.OnThermalStatusChangedListener? = null
 
     private var started = false
@@ -172,11 +174,16 @@ class MasterStreamingService : LifecycleService() {
 
     /**
      * Loads [uri] paused at 0 (see [MasterPlayerController.setMediaUri]). If the room isn't live
-     * yet it is kept and loaded by [startStreaming]. Guests are told to jump to 0; the Pause for a
-     * previously-playing item is broadcast by the playback observer.
+     * (not started yet, or stopped from the notification while the screen stayed bound) it is
+     * made live first, which loads [pendingUri]. Guests are told to jump to 0; the Pause for a
+     * previously-playing item is broadcast (before the Seek) by the main-thread playback observer.
      */
     fun setMediaUri(uri: Uri) {
         pendingUri = uri
+        if (!started) {
+            startStreaming()
+            return
+        }
         val pc = playerController ?: return
         pc.setMediaUri(uri)
         syncEngine?.broadcastSeek(0L)
@@ -234,6 +241,8 @@ class MasterStreamingService : LifecycleService() {
 
         val player = MasterPlayerController(this, vs, tap)
         playerController = player
+        // A loop restart (STATE_ENDED -> seek to 0, keep playing) must move the guests too.
+        player.setOnLoop { syncEngine?.broadcastSeek(0L) }
 
         val audio = AudioStreamer()
         audioStreamer = audio
@@ -290,17 +299,16 @@ class MasterStreamingService : LifecycleService() {
         pendingUri?.let { player.setMediaUri(it) }
 
         // 1s State heartbeat broadcast to all clients.
-        heartbeatJob = serviceScope.launch {
+        // Runs on main: ExoPlayer may only be touched there, and broadcasting from the same thread
+        // as the playback observer keeps State ordered with Play/Pause/Seek.
+        heartbeatJob = serviceScope.launch(Dispatchers.Main.immediate) {
             while (isActive) {
                 delay(HEARTBEAT_MS)
                 val pc = playerController ?: continue
-                // ExoPlayer may only be touched on the main thread (it was built there). Re-sample
-                // the live state on main (this also refreshes [playback] for the host UI, so it can
-                // never stay stale for more than a tick), then broadcast off it.
-                val snapshot = withContext(Dispatchers.Main) {
-                    pc.refresh()
-                    pc.playback.value
-                }
+                // Re-sample the live state (this also refreshes [playback] for the host UI, so it
+                // can never stay stale for more than a tick), then broadcast it.
+                pc.refresh()
+                val snapshot = pc.playback.value
                 syncEngine?.broadcastState(
                     playing = snapshot.playing,
                     positionMs = snapshot.positionMs,
@@ -350,6 +358,8 @@ class MasterStreamingService : LifecycleService() {
 
         heartbeatJob?.cancel()
         heartbeatJob = null
+        observeJob?.cancel()
+        observeJob = null
 
         // 1. NSD unregister.
         advertiser?.unregister()
@@ -487,7 +497,11 @@ class MasterStreamingService : LifecycleService() {
      */
     private fun observePlayback() {
         val pc = playerController ?: return
-        serviceScope.launch {
+        val job = SupervisorJob(serviceScope.coroutineContext[Job])
+        observeJob = job
+        // On main, where the controller publishes: every intermediate state is seen in order and
+        // each broadcast is ordered with the Seek/State broadcasts made on main.
+        serviceScope.launch(job + Dispatchers.Main.immediate) {
             var wasPlaying = pc.playback.value.playing
             var wasEnded = pc.playback.value.ended
             pc.playback.collect { info ->
@@ -505,7 +519,7 @@ class MasterStreamingService : LifecycleService() {
             }
         }
         val nsd = advertiser ?: return
-        serviceScope.launch { nsd.state.collect { _advertise.value = it } }
+        serviceScope.launch(job) { nsd.state.collect { _advertise.value = it } }
     }
 
     // ---- Thermal ----

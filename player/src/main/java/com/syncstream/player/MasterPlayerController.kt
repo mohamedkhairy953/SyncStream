@@ -86,6 +86,8 @@ class MasterPlayerController(
     @Volatile
     private var loopEnabled = false
 
+    private var onLoop: (() -> Unit)? = null
+
     private val listener = object : Player.Listener {
         override fun onVideoSizeChanged(videoSize: VideoSize) {
             // MANDATORY: size the capture texture before frames flow. Ignore unappliedRotationDegrees
@@ -98,9 +100,11 @@ class MasterPlayerController(
         override fun onPlaybackStateChanged(playbackState: Int) {
             if (playbackState == Player.STATE_ENDED) {
                 if (loopEnabled) {
-                    // Restart locally; the caller observes ended==true once and re-broadcasts Seek(0).
+                    // Restart locally (playback stays "playing"; ended is never published) and let
+                    // the owner re-broadcast Seek(0) via [setOnLoop].
                     player.seekTo(0L)
                     player.play()
+                    onLoop?.invoke()
                 }
             }
             publishState()
@@ -192,9 +196,14 @@ class MasterPlayerController(
     @Volatile
     private var currentSpeed = 1f
 
-    /** Enables/disables the loop behaviour (STATE_ENDED -> seek-to-0; caller broadcasts Seek). */
+    /** Enables/disables the loop behaviour (STATE_ENDED -> seek-to-0 + [setOnLoop] callback). */
     fun setLoop(enabled: Boolean) {
         loopEnabled = enabled
+    }
+
+    /** Called on the main thread each time looping restarts the video at 0 (owner broadcasts Seek). */
+    fun setOnLoop(listener: (() -> Unit)?) {
+        onLoop = listener
     }
 
     fun setSpeed(speed: Float) {
@@ -216,6 +225,7 @@ class MasterPlayerController(
 
     /** Releases the MediaSession and player. The [videoSource] and [pcmTap] are owned elsewhere. */
     fun release() {
+        onLoop = null
         player.removeListener(listener)
         mediaSession.release()
         player.release()

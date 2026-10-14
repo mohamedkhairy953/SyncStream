@@ -134,7 +134,7 @@ class MasterViewModel(app: Application) : AndroidViewModel(app) {
         svc.setMediaUri(uri)
         // The load is synchronous and paused; reflect it now so the player screen's first
         // composition (invite auto-open) doesn't see the previous video's "playing".
-        _playback.value = _playback.value.copy(playing = false, positionMs = 0L, ended = false)
+        _playback.value = _playback.value.copy(playing = false, positionMs = 0L, durationMs = 0L, ended = false)
     }
 
     /** Re-select a video from the recent-history list. */

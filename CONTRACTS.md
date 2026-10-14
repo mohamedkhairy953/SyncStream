@@ -365,7 +365,8 @@ fun seekTo(positionMs: Long)
 fun currentPositionMs(): Long
 fun durationMs(): Long
 fun isPlaying(): Boolean
-fun setLoop(enabled: Boolean)            // STATE_ENDED -> seek-to-0 + caller broadcasts Seek
+fun setLoop(enabled: Boolean)            // STATE_ENDED -> seek-to-0, keeps playing, then onLoop
+fun setOnLoop(listener: (() -> Unit)?)   // main thread, per loop restart; service broadcasts Seek(0)
 fun refresh()                            // re-sample the live state into playback (main thread)
 fun release()
 ```
@@ -513,7 +514,7 @@ class MasterStreamingService : LifecycleService() {
     val notificationsDenied: StateFlow<Boolean>
 
     // ---- Commands from UI ----
-    fun setMediaUri(uri: Uri)                     // load paused at 0 + broadcast Seek(0)
+    fun setMediaUri(uri: Uri)                     // load paused at 0 + broadcast Seek(0); goes live first if stopped
     fun startStreaming()                          // start FGS, NSD register, Ktor start, wakelocks; no-op once live
     fun play(); fun pause(); fun seekTo(positionMs: Long)   // main thread
     fun setLoop(enabled: Boolean)
@@ -528,7 +529,9 @@ app-scoped (never released here). Wires: `SignalingServer.Callbacks` -> `MasterP
 `playback.playing` transition (whatever caused it) is broadcast as `Play`/`Pause` with the
 position at the transition, and `End` once per end; `play()`/`pause()` only drive the player.
 Guest requests (`SyncEngine.Callbacks`, called on the WebRTC thread) are posted to the main thread.
-The 1 s heartbeat calls `MasterPlayerController.refresh()` on main and broadcasts that snapshot. Registers
+The playback observer and the 1 s heartbeat (which calls `MasterPlayerController.refresh()` and
+broadcasts that snapshot) both run on the main thread, so broadcasts stay ordered; the observers
+are cancelled in `stopStreaming()`. A loop restart broadcasts `Seek(0)`. Registers
 `PowerManager.OnThermalStatusChangedListener`: SEVERE -> `videoSource.adaptOutputFormat(960,540,24)`
 + set `thermalWarning`. FGS startup: requires POST_NOTIFICATIONS; if denied, set
 `notificationsDenied` (UI shows banner + stop control).

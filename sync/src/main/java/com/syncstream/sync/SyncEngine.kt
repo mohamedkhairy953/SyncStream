@@ -207,6 +207,7 @@ class SyncEngine(private val scope: CoroutineScope) {
                 publishPlayhead(message)
             }
             is SyncMessage.Play -> {
+                ended = false // replay / new video after End
                 val base = synthesizeState(playing = true, positionMs = message.positionMs, masterClockMs = message.masterClockMs)
                 publishPlayhead(base)
             }
@@ -215,6 +216,7 @@ class SyncEngine(private val scope: CoroutineScope) {
                 publishPlayhead(base)
             }
             is SyncMessage.Seek -> {
+                ended = false // loop restart / new video after End
                 val prev = lastState
                 val base = synthesizeState(
                     playing = prev?.playing ?: false,
