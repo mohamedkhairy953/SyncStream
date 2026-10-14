@@ -23,7 +23,7 @@ dependencies {
     implementation(project(":feature-master"))
     implementation(project(":feature-client"))
 
-    // Shell-only UI deps (MainActivity host + RolePickerScreen).
+    // Shell-only UI deps (MainActivity host + HomeScreen).
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.navigation.compose)
     implementation(libs.androidx.compose.material.icons.extended)
