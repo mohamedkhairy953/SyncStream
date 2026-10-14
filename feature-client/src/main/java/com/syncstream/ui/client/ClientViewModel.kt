@@ -94,9 +94,16 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
     private val _joinStatus = MutableStateFlow<JoinStatus>(JoinStatus.Idle)
     val joinStatus: StateFlow<JoinStatus> = _joinStatus.asStateFlow()
 
-    /** The room this VM is connected (or connecting) to; its label is shown on the watch screen. */
-    var currentRoom: RoomTarget? = null
-        private set
+    /**
+     * The room this VM is connected (or connecting) to; its label is shown on the watch screen.
+     * Rooms joined by QR / manual address start labelled with their IP; the master's name from
+     * `Welcome` replaces that once it arrives.
+     */
+    private val _currentRoom = MutableStateFlow<RoomTarget?>(null)
+    val currentRoom: StateFlow<RoomTarget?> = _currentRoom.asStateFlow()
+
+    /** The in-flight [joinWithCode] matcher, cancelled by [cancelJoin] / [joinDirect]. */
+    private var joinJob: Job? = null
 
     // ---- Runtime objects, alive only while connected ----
     private var core: WebRtcCore? = null
@@ -113,6 +120,16 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
     @Volatile
     private var lastSessionId: String? = null
 
+    /** host:port of the last dial; a session id is only re-presented to the same master. */
+    private var lastDialed: Pair<String, Int>? = null
+
+    /**
+     * Set when the master said Bye (room ended or refused). Keeps [peerState] at CLOSED so a late
+     * ICE state change from the dying peer connection can't flip the terminal UI to "Reconnecting".
+     */
+    @Volatile
+    private var roomEnded = false
+
     fun startDiscovery() = discoverer.start()
     fun stopDiscovery() = discoverer.stop()
 
@@ -120,13 +137,28 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
     fun joinWithCode(code: String, rooms: List<RoomTarget>) {
         if (_joinStatus.value is JoinStatus.Trying) return
         _joinStatus.value = JoinStatus.Trying
-        viewModelScope.launch {
+        joinJob = viewModelScope.launch {
             val result = RoomCodeMatcher.match(rooms) { room -> attempt(room, code) }
             if (result !is MatchResult.Joined) {
                 disconnect()
-                currentRoom = null
+                _currentRoom.value = null
             }
             _joinStatus.value = JoinStatus.Done(result)
+        }
+    }
+
+    /**
+     * Abandons an in-flight [joinWithCode] (the guest backed out of Join code). A half-made
+     * attempt is torn down; an already-accepted session is left alone.
+     */
+    fun cancelJoin() {
+        val wasJoining = joinJob?.isActive == true
+        joinJob?.cancel()
+        joinJob = null
+        _joinStatus.value = JoinStatus.Idle
+        if (wasJoining && _connection.value !is ConnectionState.Connected) {
+            disconnect()
+            _currentRoom.value = null
         }
     }
 
@@ -136,7 +168,11 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
 
     /** QR / IP-fallback path: the PIN is already known to be the right one for this room. */
     fun joinDirect(room: RoomTarget, pin: String) {
-        currentRoom = room
+        // A code match still running must not adopt (or tear down) this session.
+        joinJob?.cancel()
+        joinJob = null
+        _joinStatus.value = JoinStatus.Idle
+        _currentRoom.value = room
         connect(room.host, room.port, pin)
     }
 
@@ -147,7 +183,7 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
      * retry loop is stopped by the next [connect] (or by [disconnect] once matching ends).
      */
     private suspend fun attempt(room: RoomTarget, code: String): AttemptResult {
-        currentRoom = room
+        _currentRoom.value = room
         connect(room.host, room.port, code)
         val outcome = withTimeoutOrNull(ATTEMPT_TIMEOUT_MS) {
             connection.first { it is ConnectionState.Connected || it is ConnectionState.Rejected }
@@ -168,6 +204,10 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
         // Never let a stale Connected/Rejected from a previous room be observed for this dial.
         _connection.value = ConnectionState.Connecting
         _peerState.value = PeerState.NEW
+        roomEnded = false
+        // Don't present room A's session id to room B.
+        if (lastDialed != host to port) lastSessionId = null
+        lastDialed = host to port
         acquireMulticastLock()
 
         val webRtc = WebRtcCore(container.peerConnectionFactory, container.eglBase)
@@ -247,6 +287,10 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
     private fun signalingCallbacks(peers: ClientPeerManager) = object : SignalingClient.Callbacks {
         override fun onWelcome(sessionId: String, masterName: String) {
             lastSessionId = sessionId
+            val room = _currentRoom.value
+            if (room != null && room.label == room.host && masterName.isNotBlank()) {
+                _currentRoom.value = room.copy(label = masterName)
+            }
         }
 
         override fun onOffer(sdp: String) {
@@ -259,8 +303,17 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
         }
 
         override fun onClosed(reason: String?) {
-            // Master ended or socket dropped: surface as CLOSED so the UI can show the terminal state.
+            // A close without a Bye is a network blip (e.g. ping timeout): SignalingClient keeps
+            // retrying, so stay in Connecting and let the UI show "Reconnecting…".
+            if (reason == SOCKET_CLOSED) return
+            // A Bye: the master refused us or ended the room. Surface CLOSED (terminal UI) and,
+            // for an ended room, stop the pointless reconnect loop. A rejection already ended it.
+            roomEnded = true
             _peerState.value = PeerState.CLOSED
+            val client = signaling
+            if (client != null && client.connection.value !is ConnectionState.Rejected) {
+                client.disconnect("host ended")
+            }
         }
 
         override fun onError(t: Throwable) {
@@ -300,7 +353,7 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
 
         override fun onPeerStateChanged(state: PeerState) {
             Log.i(TAG, "peer state -> $state")
-            _peerState.value = state
+            if (!roomEnded) _peerState.value = state
         }
     }
 
@@ -379,7 +432,6 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
-        signaling?.disconnect("client closed")
         teardownRuntime()
         discoverer.stop()
         super.onCleared()
@@ -391,6 +443,9 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
         const val TAG = "ClientViewModel"
         const val STATS_POLL_MS = 2_000L
         const val ATTEMPT_TIMEOUT_MS = 5_000L
+
+        /** SignalingClient's reason for a socket that closed without a Bye (it then retries). */
+        const val SOCKET_CLOSED = "socket closed"
     }
 }
 

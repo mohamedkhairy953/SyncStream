@@ -87,7 +87,8 @@ fun ClientScreen(viewModel: ClientViewModel, onLeave: () -> Unit) {
     val remoteTrack by viewModel.remoteVideoTrack.collectAsStateWithLifecycle()
 
     val eglContext = remember { viewModel.eglContext }
-    val label = viewModel.currentRoom?.label ?: "the host"
+    val currentRoom by viewModel.currentRoom.collectAsStateWithLifecycle()
+    val label = currentRoom?.label ?: "the host"
 
     val leave: () -> Unit = {
         viewModel.disconnect()

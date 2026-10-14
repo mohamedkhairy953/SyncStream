@@ -1,5 +1,6 @@
 package com.syncstream.ui.client
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
@@ -147,6 +148,13 @@ fun JoinCodeScreen(
         code = code.dropLast(1)
     }
 
+    // Backing out abandons any code match still running so it can't connect behind our back.
+    val leave: () -> Unit = {
+        viewModel.cancelJoin()
+        onBack()
+    }
+    BackHandler(onBack = leave)
+
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
 
@@ -167,7 +175,7 @@ fun JoinCodeScreen(
             .focusable()
             .safeDrawingPadding(),
     ) {
-        IconButton(onClick = onBack, modifier = Modifier.padding(SyncSpacing.xs)) {
+        IconButton(onClick = leave, modifier = Modifier.padding(SyncSpacing.xs)) {
             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
         }
         Column(
@@ -204,9 +212,9 @@ fun JoinCodeScreen(
 
             val noRoom = result == MatchResult.NoMatch || result == MatchResult.NoRooms
             if (noRoom) {
-                SecondaryButton("Trouble connecting?", onClick = { showManual = true })
+                SecondaryButton("Trouble connecting?", onClick = { showManual = true }, enabled = !busy)
             } else {
-                TextButton(onClick = { showManual = true }) { Text("Trouble connecting?") }
+                TextButton(onClick = { showManual = true }, enabled = !busy) { Text("Trouble connecting?") }
             }
         }
     }
