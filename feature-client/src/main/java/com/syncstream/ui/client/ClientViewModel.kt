@@ -25,8 +25,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import org.webrtc.DataChannel
 import org.webrtc.EglBase
 import org.webrtc.IceCandidate
@@ -35,9 +37,11 @@ import org.webrtc.VideoTrack
 /**
  * Client-side composition root. Owns (no service) the [SignalingClient], a [ClientPeerManager]
  * fed by the shared [WebRtcCore] (EGL/factory from [com.syncstream.AppContainer]), a [ClockSync],
- * a client-side [SyncEngine] and an [AudioReceiver], plus the [NsdDiscoverer]. The master is reached
- * by scanning its join QR, picking it from the discovered list, or typing its code (see
- * `QrScanScreen`) — the latter two matter for cameraless devices such as Android TV.
+ * a client-side [SyncEngine] and an [AudioReceiver], plus the [NsdDiscoverer]. One instance is
+ * shared by the guest screens (Join code, Scan, Watch). A room is joined either by code
+ * ([joinWithCode], which tries the code against one chosen room or every discovered one) or
+ * directly with a PIN already known to be right ([joinDirect], from a QR or the manual
+ * `host:port:pin` dialog) — the latter matters for cameraless devices such as Android TV.
  *
  * The ViewModel holds NO raw signalling/WebRTC state in the UI sense — it exposes only the
  * derived [StateFlow]s the screens render. WebRTC objects are created/destroyed in [connect]/
@@ -62,7 +66,7 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
     /** Shared EGL context for the client's `SurfaceViewRenderer`. */
     val eglContext: EglBase.Context get() = container.eglBase.eglBaseContext
 
-    // ---- Discovery (browse the LAN for masters; used by QrScanScreen's list) ----
+    // ---- Discovery (browse the LAN for masters; used by the "no room chosen" code path) ----
     private val discoverer = NsdDiscoverer(app)
     val discovered: StateFlow<List<DiscoveredService>> get() = discoverer.services
     val discoveryState: StateFlow<DiscoveryState> get() = discoverer.state
@@ -86,6 +90,14 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
     private val _remoteVideoTrack = MutableStateFlow<VideoTrack?>(null)
     val remoteVideoTrack: StateFlow<VideoTrack?> = _remoteVideoTrack.asStateFlow()
 
+    // ---- Joining ----
+    private val _joinStatus = MutableStateFlow<JoinStatus>(JoinStatus.Idle)
+    val joinStatus: StateFlow<JoinStatus> = _joinStatus.asStateFlow()
+
+    /** The room this VM is connected (or connecting) to; its label is shown on the watch screen. */
+    var currentRoom: RoomTarget? = null
+        private set
+
     // ---- Runtime objects, alive only while connected ----
     private var core: WebRtcCore? = null
     private var signaling: SignalingClient? = null
@@ -104,12 +116,58 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
     fun startDiscovery() = discoverer.start()
     fun stopDiscovery() = discoverer.stop()
 
+    /** Code entry: try [code] against [rooms] (a single chosen room, or every discovered one). */
+    fun joinWithCode(code: String, rooms: List<RoomTarget>) {
+        if (_joinStatus.value is JoinStatus.Trying) return
+        _joinStatus.value = JoinStatus.Trying
+        viewModelScope.launch {
+            val result = RoomCodeMatcher.match(rooms) { room -> attempt(room, code) }
+            if (result !is MatchResult.Joined) {
+                disconnect()
+                currentRoom = null
+            }
+            _joinStatus.value = JoinStatus.Done(result)
+        }
+    }
+
+    fun resetJoinStatus() {
+        _joinStatus.value = JoinStatus.Idle
+    }
+
+    /** QR / IP-fallback path: the PIN is already known to be the right one for this room. */
+    fun joinDirect(room: RoomTarget, pin: String) {
+        currentRoom = room
+        connect(room.host, room.port, pin)
+    }
+
+    /**
+     * Dials [room] with [code] and waits for the master's verdict. [connect] resets [connection]
+     * to `Connecting` first, so a `Connected` left over from a previous room can't satisfy the
+     * wait. A room that never answers within [ATTEMPT_TIMEOUT_MS] is reported as unreachable; its
+     * retry loop is stopped by the next [connect] (or by [disconnect] once matching ends).
+     */
+    private suspend fun attempt(room: RoomTarget, code: String): AttemptResult {
+        currentRoom = room
+        connect(room.host, room.port, code)
+        val outcome = withTimeoutOrNull(ATTEMPT_TIMEOUT_MS) {
+            connection.first { it is ConnectionState.Connected || it is ConnectionState.Rejected }
+        }
+        return when (outcome) {
+            is ConnectionState.Connected -> AttemptResult.Accepted
+            is ConnectionState.Rejected -> RoomCodeMatcher.classifyRejection(outcome.reason)
+            else -> AttemptResult.Unreachable
+        }
+    }
+
     /**
      * Builds the full client runtime and dials the master. Any prior runtime is torn down first.
      * [previousSessionId] (or the cached [lastSessionId]) lets the master reclaim our encoder slot.
      */
     fun connect(host: String, port: Int, pin: String, previousSessionId: String? = null) {
         teardownRuntime()
+        // Never let a stale Connected/Rejected from a previous room be observed for this dial.
+        _connection.value = ConnectionState.Connecting
+        _peerState.value = PeerState.NEW
         acquireMulticastLock()
 
         val webRtc = WebRtcCore(container.peerConnectionFactory, container.eglBase)
@@ -157,8 +215,7 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Tears down the live session and returns the UI to a disconnected baseline. */
     fun disconnect() {
-        signaling?.disconnect("client left")
-        teardownRuntime()
+        teardownRuntime() // also stops the signaling loop and sends a best-effort Bye
         _connection.value = ConnectionState.Disconnected
         _peerState.value = PeerState.CLOSED
         _remoteVideoTrack.value = null
@@ -295,6 +352,9 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
         syncEngine = null
         peerManager?.close()
         peerManager = null
+        // Stop the old client's connect/reconnect loop; otherwise an unreachable (or previous)
+        // room keeps retrying in viewModelScope after we've moved on. Idempotent.
+        signaling?.disconnect("client left")
         signaling = null
         core = null
         _remoteVideoTrack.value = null
@@ -330,5 +390,13 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
     private companion object {
         const val TAG = "ClientViewModel"
         const val STATS_POLL_MS = 2_000L
+        const val ATTEMPT_TIMEOUT_MS = 5_000L
     }
+}
+
+/** Join-code screen state. */
+sealed interface JoinStatus {
+    data object Idle : JoinStatus
+    data object Trying : JoinStatus
+    data class Done(val result: MatchResult) : JoinStatus
 }
