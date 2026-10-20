@@ -6,8 +6,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -28,6 +31,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -243,36 +247,61 @@ fun ClientScreen(viewModel: ClientViewModel, onLeave: () -> Unit) {
 /** The remote video, scaled to fit. Sinks are swapped as the track changes; released on dispose. */
 @Composable
 private fun VideoSurface(eglContext: org.webrtc.EglBase.Context, track: org.webrtc.VideoTrack?) {
+    // Aspect ratio of the actual decoded video (w/h after display rotation). 0 until the
+    // first frame's resolution is known. Reported by the renderer's onFrameResolutionChanged.
+    var videoAspect by remember { mutableFloatStateOf(0f) }
     val renderer = remember { object { var view: SurfaceViewRenderer? = null } }
 
-    AndroidView(
-        modifier = Modifier.fillMaxSize(),
-        factory = { ctx ->
-            SurfaceViewRenderer(ctx).apply {
-                layoutParams = ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                )
-                init(eglContext, null)
-                setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
-                setEnableHardwareScaler(true)
-                renderer.view = this
-            }
-        },
-    )
-
-    DisposableEffect(Unit) {
-        onDispose {
-            renderer.view?.release()
-            renderer.view = null
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        // Letterbox/pillarbox: size the surface to the video aspect and centre it on black,
+        // always fitting inside the current screen bounds (recomputed on rotation).
+        val screenAspect = maxWidth / maxHeight
+        val surfaceModifier = when {
+            videoAspect <= 0f -> Modifier.fillMaxSize()
+            videoAspect >= screenAspect -> Modifier.fillMaxWidth().aspectRatio(videoAspect)
+            else -> Modifier.fillMaxHeight().aspectRatio(videoAspect)
         }
-    }
+        AndroidView(
+            modifier = surfaceModifier.align(Alignment.Center),
+            factory = { ctx ->
+                SurfaceViewRenderer(ctx).apply {
+                    layoutParams = ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    )
+                    init(
+                        eglContext,
+                        object : RendererCommon.RendererEvents {
+                            override fun onFirstFrameRendered() {}
+                            override fun onFrameResolutionChanged(w: Int, h: Int, rotation: Int) {
+                                if (w > 0 && h > 0) {
+                                    videoAspect =
+                                        if (rotation % 180 == 0) w.toFloat() / h
+                                        else h.toFloat() / w
+                                }
+                            }
+                        },
+                    )
+                    setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
+                    setEnableHardwareScaler(false)
+                    renderer.view = this
+                }
+            },
+        )
 
-    DisposableEffect(track) {
-        val view = renderer.view
-        if (view != null && track != null) track.addSink(view)
-        onDispose {
-            if (view != null && track != null) track.removeSink(view)
+        DisposableEffect(Unit) {
+            onDispose {
+                renderer.view?.release()
+                renderer.view = null
+            }
+        }
+
+        DisposableEffect(track) {
+            val view = renderer.view
+            if (view != null && track != null) track.addSink(view)
+            onDispose {
+                if (view != null && track != null) track.removeSink(view)
+            }
         }
     }
 }
