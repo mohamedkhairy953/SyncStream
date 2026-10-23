@@ -1,5 +1,11 @@
 package com.syncstream.ui.client
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.pm.ActivityInfo
+import android.content.res.Configuration
+import android.view.SurfaceHolder
 import android.view.ViewGroup
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -22,6 +28,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -39,7 +46,11 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
@@ -63,10 +74,14 @@ import com.syncstream.ui.theme.SyncTheme
 import kotlinx.coroutines.delay
 import org.webrtc.RendererCommon
 import org.webrtc.SurfaceViewRenderer
+import org.webrtc.VideoFrame
+import org.webrtc.VideoSink
 
 private const val SEEK_STEP_MS = 10_000L
 private const val TICK_MS = 500L
 private const val CONTROL_HINT_MS = 4_000L
+private const val MIN_ZOOM = 1f
+private const val MAX_ZOOM = 5f
 private val CenterPlaySize = 76.dp
 private val CenterPlayIconSize = 44.dp
 private val SpinnerSize = 40.dp
@@ -152,6 +167,35 @@ fun ClientScreen(viewModel: ClientViewModel, onLeave: () -> Unit) {
         if (playhead.playing) viewModel.pause() else viewModel.play()
     }
 
+    // ---- Display: the video is always letterboxed/pillarboxed (never cropped or distorted).
+    // The screen follows the device sensor unless the rotate button was used to lock it.
+    var videoAspect by remember { mutableFloatStateOf(0f) }
+    var manualPortraitOverride by rememberSaveable { mutableStateOf<Boolean?>(null) }
+    var zoom by remember { mutableFloatStateOf(1f) }
+    var pan by remember { mutableStateOf(Offset.Zero) }
+
+    val context = LocalContext.current
+    val isPortraitNow = LocalConfiguration.current.orientation == Configuration.ORIENTATION_PORTRAIT
+    DisposableEffect(manualPortraitOverride) {
+        val activity = context.findActivity()
+        val forced = manualPortraitOverride
+        if (activity != null && forced != null) {
+            activity.requestedOrientation = if (forced) {
+                ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+            } else {
+                ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            }
+        }
+        onDispose {
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
+    }
+
+    val resetZoom = {
+        zoom = 1f
+        pan = Offset.Zero
+    }
+
     PlayerOverlayScaffold(
         visible = overlay.visible,
         onTap = {
@@ -162,9 +206,25 @@ fun ClientScreen(viewModel: ClientViewModel, onLeave: () -> Unit) {
                 overlay.poke()
             }
         },
+        onDoubleTap = {
+            overlay.poke()
+            if (zoom > 1.05f) resetZoom()
+        },
+        onTransform = { zoomChange, panChange ->
+            val newZoom = (zoom * zoomChange).coerceIn(MIN_ZOOM, MAX_ZOOM)
+            zoom = newZoom
+            pan = if (newZoom <= 1.01f) Offset.Zero else pan + panChange
+        },
         modifier = Modifier.background(Color.Black),
         video = {
-            VideoSurface(eglContext = eglContext, track = remoteTrack)
+            VideoSurface(
+                eglContext = eglContext,
+                track = remoteTrack,
+                videoAspect = videoAspect,
+                onVideoAspectChanged = { videoAspect = it },
+                zoom = zoom,
+                pan = pan,
+            )
         },
         topBar = {
             IconButton(onClick = leave) {
@@ -181,6 +241,20 @@ fun ClientScreen(viewModel: ClientViewModel, onLeave: () -> Unit) {
                 }
             }
             Spacer(Modifier.weight(1f))
+            IconButton(
+                onClick = {
+                    overlay.poke()
+                    val current = manualPortraitOverride ?: isPortraitNow
+                    manualPortraitOverride = !current
+                },
+            ) {
+                Icon(
+                    Icons.Filled.ScreenRotation,
+                    contentDescription = "Rotate screen",
+                    tint = SyncTheme.colors.onScrim,
+                )
+            }
+            Spacer(Modifier.width(SyncSpacing.s))
             SoundPill(muted = muted, onToggle = { overlay.poke(); viewModel.setMuted(!muted) })
             Spacer(Modifier.width(SyncSpacing.s))
             SpeedMenu(speed = playhead.speed, onSetSpeed = { onControl(); viewModel.setSpeed(it) })
@@ -244,25 +318,48 @@ fun ClientScreen(viewModel: ClientViewModel, onLeave: () -> Unit) {
     )
 }
 
-/** The remote video, scaled to fit. Sinks are swapped as the track changes; released on dispose. */
+/** The remote video, letterboxed/pillarboxed to its own aspect (never cropped), with optional [zoom]/[pan]. Sinks are swapped as the track changes; released on dispose. */
 @Composable
-private fun VideoSurface(eglContext: org.webrtc.EglBase.Context, track: org.webrtc.VideoTrack?) {
-    // Aspect ratio of the actual decoded video (w/h after display rotation). 0 until the
-    // first frame's resolution is known. Reported by the renderer's onFrameResolutionChanged.
-    var videoAspect by remember { mutableFloatStateOf(0f) }
-    val renderer = remember { object { var view: SurfaceViewRenderer? = null } }
+private fun VideoSurface(
+    eglContext: org.webrtc.EglBase.Context,
+    track: org.webrtc.VideoTrack?,
+    videoAspect: Float,
+    onVideoAspectChanged: (Float) -> Unit,
+    zoom: Float,
+    pan: Offset,
+) {
+    val renderer = remember {
+        object {
+            var view: SurfaceViewRenderer? = null
+            var boundTrack: org.webrtc.VideoTrack? = null
+        }
+    }
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
-        // Letterbox/pillarbox: size the surface to the video aspect and centre it on black,
-        // always fitting inside the current screen bounds (recomputed on rotation).
-        val screenAspect = maxWidth / maxHeight
+        val screenAspect = if (maxHeight.value > 0f) maxWidth / maxHeight else 1f
+        // Letterbox (wide video on a tall screen) or pillarbox (tall video on a wide screen):
+        // the surface is sized to the video's aspect inside the screen bounds, so 100% of the
+        // frame is always visible — nothing is cropped or stretched.
         val surfaceModifier = when {
             videoAspect <= 0f -> Modifier.fillMaxSize()
             videoAspect >= screenAspect -> Modifier.fillMaxWidth().aspectRatio(videoAspect)
             else -> Modifier.fillMaxHeight().aspectRatio(videoAspect)
         }
+        val totalScale = zoom
+        val maxPanX = (constraints.maxWidth * (totalScale - 1f) / 2f).coerceAtLeast(0f)
+        val maxPanY = (constraints.maxHeight * (totalScale - 1f) / 2f).coerceAtLeast(0f)
+        val clampedPanX = pan.x.coerceIn(-maxPanX, maxPanX)
+        val clampedPanY = pan.y.coerceIn(-maxPanY, maxPanY)
+
         AndroidView(
-            modifier = surfaceModifier.align(Alignment.Center),
+            modifier = surfaceModifier
+                .align(Alignment.Center)
+                .graphicsLayer {
+                    scaleX = totalScale
+                    scaleY = totalScale
+                    translationX = clampedPanX
+                    translationY = clampedPanY
+                },
             factory = { ctx ->
                 SurfaceViewRenderer(ctx).apply {
                     layoutParams = ViewGroup.LayoutParams(
@@ -275,9 +372,10 @@ private fun VideoSurface(eglContext: org.webrtc.EglBase.Context, track: org.webr
                             override fun onFirstFrameRendered() {}
                             override fun onFrameResolutionChanged(w: Int, h: Int, rotation: Int) {
                                 if (w > 0 && h > 0) {
-                                    videoAspect =
+                                    val aspect =
                                         if (rotation % 180 == 0) w.toFloat() / h
                                         else h.toFloat() / w
+                                    onVideoAspectChanged(aspect)
                                 }
                             }
                         },
@@ -285,22 +383,32 @@ private fun VideoSurface(eglContext: org.webrtc.EglBase.Context, track: org.webr
                     setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
                     setEnableHardwareScaler(false)
                     renderer.view = this
+                    if (track != null) {
+                        track.addSink(this)
+                        renderer.boundTrack = track
+                    }
+                }
+            },
+            update = { view ->
+                val prev = renderer.boundTrack
+                if (prev !== track) {
+                    prev?.removeSink(view)
+                    track?.addSink(view)
+                    renderer.boundTrack = track
                 }
             },
         )
 
         DisposableEffect(Unit) {
             onDispose {
-                renderer.view?.release()
+                val view = renderer.view
+                val prev = renderer.boundTrack
+                if (view != null && prev != null) {
+                    runCatching { prev.removeSink(view) }
+                }
+                renderer.boundTrack = null
+                view?.release()
                 renderer.view = null
-            }
-        }
-
-        DisposableEffect(track) {
-            val view = renderer.view
-            if (view != null && track != null) track.addSink(view)
-            onDispose {
-                if (view != null && track != null) track.removeSink(view)
             }
         }
     }
@@ -324,6 +432,12 @@ private fun rememberTickedPosition(playhead: PlayheadInfo): Long {
         }
     }
     return ticked
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }
 
 @Composable

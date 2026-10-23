@@ -6,8 +6,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
@@ -33,8 +33,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.tooling.preview.Preview
 import com.syncstream.ui.theme.SyncMotion
 import com.syncstream.ui.theme.SyncSpacing
@@ -44,7 +46,8 @@ import kotlinx.coroutines.delay
 /**
  * Full-screen player chrome. [video] fills the screen; [topBar] and [bottomBar] fade with [visible]
  * on scrim gradients; [centerContent] is always shown (status messages). A tap anywhere on the
- * video area calls [onTap].
+ * video area calls [onTap]; optional [onDoubleTap] and [onTransform] enable pinch-to-zoom and pan
+ * on the video surface without blocking single-tap overlay controls.
  */
 @Composable
 fun PlayerOverlayScaffold(
@@ -54,6 +57,8 @@ fun PlayerOverlayScaffold(
     topBar: @Composable RowScope.() -> Unit,
     bottomBar: @Composable ColumnScope.() -> Unit,
     modifier: Modifier = Modifier,
+    onDoubleTap: (() -> Unit)? = null,
+    onTransform: ((zoomChange: Float, panChange: Offset) -> Unit)? = null,
     centerContent: @Composable BoxScope.() -> Unit = {},
 ) {
     val scrim = SyncTheme.colors.scrim
@@ -63,7 +68,23 @@ fun PlayerOverlayScaffold(
         Box(
             Modifier
                 .fillMaxSize()
-                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onTap),
+                .pointerInput(onTap, onDoubleTap) {
+                    detectTapGestures(
+                        onTap = { onTap() },
+                        onDoubleTap = if (onDoubleTap != null) { _ -> onDoubleTap() } else null,
+                    )
+                }
+                .then(
+                    if (onTransform != null) {
+                        Modifier.pointerInput(onTransform) {
+                            detectTransformGestures { _, pan, zoom, _ ->
+                                onTransform(zoom, pan)
+                            }
+                        }
+                    } else {
+                        Modifier
+                    },
+                ),
         )
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { centerContent() }
         AnimatedVisibility(
