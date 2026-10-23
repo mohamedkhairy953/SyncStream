@@ -148,16 +148,28 @@ class MasterPlayerController(
         player.playWhenReady = false
     }
 
+    /** Presentation kind of the currently loaded item ("video" until set, "audio" for audio-only). */
+    @Volatile
+    var mediaKind: String = "video"
+        private set
+
     /**
      * Loads the OpenDocument [uri] (persistable permission already taken upstream) and prepares it
      * PAUSED at position 0: the first frame renders (and streams) but playback only starts on an
      * explicit [play]. playWhenReady is reset because it otherwise survives from the previous item,
-     * which made a re-picked video auto-play.
+     * which made a re-picked video auto-play. [kind] labels the presentation type for the UI and
+     * the guest heartbeat.
      */
-    fun setMediaUri(uri: Uri) {
+    fun setMediaUri(uri: Uri, kind: String = "video") {
+        mediaKind = kind
         player.playWhenReady = false
-        player.setMediaItem(MediaItem.fromUri(uri), /* startPositionMs = */ 0L)
-        player.prepare()
+        if (kind == "video" || kind == "audio") {
+            player.setMediaItem(MediaItem.fromUri(uri), /* startPositionMs = */ 0L)
+            player.prepare()
+        } else {
+            player.stop()
+            player.clearMediaItems()
+        }
         publishState()
     }
 
@@ -245,6 +257,7 @@ class MasterPlayerController(
             durationMs = durationMs(),
             ended = ended,
             speed = currentSpeed,
+            kind = mediaKind,
         )
     }
 }
@@ -253,7 +266,8 @@ class MasterPlayerController(
  * Authoritative master playback snapshot surfaced to the UI and used to seed [SyncMessage.State]
  * heartbeats. [playing] is the playback intent (playWhenReady, not suppressed, READY or BUFFERING);
  * [positionMs]/[durationMs] are in the media timeline; [PlaybackInfo.ended] reflects ExoPlayer
- * STATE_ENDED.
+ * STATE_ENDED. [kind] is the presentation type ("video", "audio", …) chosen when the media was
+ * picked — the UI and guest heartbeat branch on it (see docs/plan-shareable-content.md).
  */
 data class PlaybackInfo(
     val playing: Boolean,
@@ -261,4 +275,5 @@ data class PlaybackInfo(
     val durationMs: Long,
     val ended: Boolean,
     val speed: Float = 1f,
+    val kind: String = "video",
 )

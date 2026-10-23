@@ -3,7 +3,8 @@
 Synchronized video playback across phones on the same Wi-Fi/LAN — no internet required. One
 device (the **master**) plays a local video and streams it in real time to up to four nearby
 devices (the **clients**), keeping every screen's playhead and audio frame-aligned. Think
-"shared watch party over the local network."
+"shared watch party over the local network." The same room can also present **audio**,
+**photos**, **PDFs** (page-synced) and hand out **any file** to everyone in it.
 
 ## How it works
 
@@ -25,6 +26,12 @@ devices (the **clients**), keeping every screen's playhead and audio frame-align
 - **Audio** — decoded PCM is tapped from the master's ExoPlayer and streamed as 20 ms frames over
   the `audio` DataChannel; clients play it back scheduled against the synced clock (muted by
   default).
+- **Other content** — the heartbeat names what the room is showing (`mediaKind`: video, audio,
+  image, pdf or file, plus a title, a payload id, the PDF page and the size). Photos, PDFs and
+  files are *not* re-encoded through the video pipeline: guests fetch the original from the
+  master's own HTTP endpoint (`GET /media` on the signaling port, PIN-gated, resumable with
+  `Range`) and render it locally. Audio reuses the PCM channel with no video track; a PDF page
+  flip is a `ShowPage` command on `cmd` that the heartbeat repeats for late joiners.
 
 ## Module architecture
 
@@ -44,13 +51,14 @@ plugins, and the dependency direction is acyclic (enforced by the module graph).
 ── capability libraries ──
 :webrtc      WebRtcCore, peer managers, ExoSurfaceVideoSource, RtcConfigs   → :core
 :player      MasterPlayerController, PcmTapProcessor                        → :webrtc, :core
-:signaling   Ktor server/client, ClientFsm, ClientRegistry, SignalMessage   → :core
+:signaling   Ktor server/client (+ GET /media payloads), ClientFsm, ClientRegistry, SignalMessage → :core
 :sync        ClockSync, SyncEngine, AudioStreamer, AudioReceiver            (standalone)
 :discovery   NsdAdvertiser, NsdDiscoverer                                   (standalone)
 
 ── foundation ──
 :design      design system: theme tokens + shared Compose components      (no project deps)
-:core        AppContainer (EglBase/PeerConnectionFactory/scope/Json), PeerState
+:core        AppContainer (EglBase/PeerConnectionFactory/scope/Json), PeerState, JoinLink,
+             formatByteSize, renderPdfPage
 ```
 
 - `:core` owns the only app-scoped singletons (`EglBase`, `PeerConnectionFactory`), created once
@@ -76,12 +84,16 @@ plugins, and the dependency direction is acyclic (enforced by the module graph).
 
 Run the app on two or more devices on the same network.
 
-- **Host:** on Home tap **Host a room**, then **pick a video** (or choose from recents). The room is
-  live straight away. A picked video loads **paused** at the start (its first frame is already
-  streamed to guests); the host starts it for everyone with **Play for everyone** or the play
-  button. The **invite sheet** opens automatically while no guest has joined, showing the 4-digit
-  **room code**, the join QR and the guest list, with **Play for everyone** and **End room**. Backing out of the full-screen player returns to the picker with the room still
-  live; **End room** stops hosting and returns to Home.
+- **Host:** on Home tap **Host a room**, then **pick media** — a **Video**, **Audio** track,
+  **Photo**, **PDF** or any **File** from the device (or choose from recents). The room is
+  live straight away. A picked video or song loads **paused** at the start (a video's first
+  frame is already streamed to guests); the host starts it for everyone with **Play for
+  everyone** or the play button. A photo or PDF shows immediately on every screen (pinch to
+  zoom; PDF pages turn for everyone with the page arrows), and a file starts transferring to
+  every guest. The **invite sheet** opens automatically while no guest has joined, showing the
+  4-digit **room code**, the join QR and the guest list, with **Play for everyone** and **End
+  room**. Backing out of the full-screen player returns to the picker with the room still live;
+  **End room** stops hosting and returns to Home.
 - **Guest:** Home lists **Rooms nearby** live. Tap one and type its 4-digit code; or tap **Enter
   code** to try the code against every room on the network; or tap **Scan QR** (hidden when the
   device has no camera). If that fails, **Trouble connecting?** takes a `host:port:pin` string.
@@ -89,7 +101,10 @@ Run the app on two or more devices on the same network.
   and auto-hiding transport controls with a speed menu. Everyone can control playback for all
   participants; playback stays frame-aligned to the host and the screen stays awake while playing.
   If the host's player pauses on its own (a call or other media taking audio focus, headphones
-  unplugged, a media button), guests pause with it.
+  unplugged, a media button), guests pause with it. For a photo or PDF the guest downloads the
+  original from the host (progress shown), views it full-quality with pinch-zoom, and can turn
+  PDF pages for the room; a shared file shows its name and size while it arrives and then offers
+  **Save to device** (Downloads). Late joiners land on the current item and page.
 
 > Works over any shared LAN — including one phone's own **Wi-Fi hotspot** with no internet (the
 > master can host the hotspot itself). All media stays on the local network via host ICE candidates

@@ -11,11 +11,17 @@ import io.ktor.websocket.WebSocketSession
 import io.ktor.websocket.close
 import io.ktor.websocket.readText
 import io.ktor.websocket.send
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.ClosedReceiveChannelException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -23,6 +29,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /**
  * Connection states surfaced to the client UI/ViewModel.
@@ -129,6 +136,73 @@ class SignalingClient(
 
     suspend fun sendIce(sdpMid: String?, sdpMLineIndex: Int, candidate: String) =
         sendMessage(SignalMessage.Ice(sdpMid, sdpMLineIndex, candidate))
+
+    /**
+     * Downloads the master's currently shared payload (`GET /media`) into [destFile], invoking
+     * [onProgress] with `(bytesRead, totalBytes)` as chunks arrive (`totalBytes` is -1 when the
+     * master doesn't know the size). Streams in 64 KB blocks on [Dispatchers.IO] without
+     * buffering the file in RAM. A leftover `.part` from an interrupted transfer is resumed with a
+     * `Range` request when the master honours it (HTTP 206), otherwise restarted. Returns true
+     * once the whole payload is in [destFile].
+     */
+    suspend fun downloadMedia(
+        mediaId: String,
+        destFile: File,
+        onProgress: (bytesRead: Long, totalBytes: Long) -> Unit = { _, _ -> },
+    ): Boolean = withContext(Dispatchers.IO) {
+        val encodedPin = URLEncoder.encode(pin, "UTF-8")
+        val encodedId = URLEncoder.encode(mediaId, "UTF-8")
+        val sessionParam = currentSessionId?.let { "&sessionId=${URLEncoder.encode(it, "UTF-8")}" } ?: ""
+        val url = URL("http://$host:$port/media?pin=$encodedPin&id=$encodedId$sessionParam")
+        val tmpFile = File(destFile.parentFile, "${destFile.name}.part")
+        val resumeFrom = tmpFile.length().takeIf { it > 0L } ?: 0L
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            connectTimeout = 8_000
+            readTimeout = 30_000
+            requestMethod = "GET"
+            if (resumeFrom > 0L) setRequestProperty("Range", "bytes=$resumeFrom-")
+        }
+        try {
+            val code = conn.responseCode
+            val resumed = code == HttpURLConnection.HTTP_PARTIAL
+            if (code != HttpURLConnection.HTTP_OK && !resumed) {
+                Log.w(TAG, "downloadMedia($mediaId) HTTP $code")
+                return@withContext false
+            }
+            val offset = if (resumed) resumeFrom else 0L
+            val remaining = conn.contentLengthLong
+            val total = if (remaining < 0L) -1L else offset + remaining
+            conn.inputStream.use { input ->
+                java.io.FileOutputStream(tmpFile, /* append = */ resumed).use { output ->
+                    val buf = ByteArray(64 * 1024)
+                    var downloaded = offset
+                    onProgress(downloaded, total)
+                    while (true) {
+                        ensureActive()
+                        val n = input.read(buf)
+                        if (n <= 0) break
+                        output.write(buf, 0, n)
+                        downloaded += n
+                        onProgress(downloaded, total)
+                    }
+                    output.flush()
+                    if (total >= 0L && downloaded != total) {
+                        Log.w(TAG, "downloadMedia($mediaId) short read $downloaded/$total")
+                        return@withContext false
+                    }
+                }
+            }
+            if (destFile.exists()) destFile.delete()
+            tmpFile.renameTo(destFile)
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (t: Throwable) {
+            Log.w(TAG, "downloadMedia($mediaId) failed", t)
+            false
+        } finally {
+            runCatching { conn.disconnect() }
+        }
+    }
 
     private suspend fun sendMessage(message: SignalMessage) {
         val session = activeSession ?: run {

@@ -3,19 +3,27 @@ package com.syncstream.ui.master
 import android.app.Activity
 import android.view.ViewGroup
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -32,14 +40,24 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.syncstream.core.formatByteSize
 import com.syncstream.ui.components.GuestAvatarRow
+import com.syncstream.ui.components.MediaKinds
+import com.syncstream.ui.components.PageControls
 import com.syncstream.ui.components.PlayerOverlayScaffold
 import com.syncstream.ui.components.RoomChip
 import com.syncstream.ui.components.SeekBar
@@ -48,6 +66,7 @@ import com.syncstream.ui.components.StatusPill
 import com.syncstream.ui.components.StatusTone
 import com.syncstream.ui.components.TransportControls
 import com.syncstream.ui.components.rememberOverlayVisibility
+import com.syncstream.ui.theme.SyncSpacing
 import com.syncstream.ui.theme.SyncTheme
 import kotlinx.coroutines.delay
 import org.webrtc.RendererCommon
@@ -78,6 +97,16 @@ fun MasterPlayerScreen(
     val pin by viewModel.pin.collectAsStateWithLifecycle()
     val clients by viewModel.clients.collectAsStateWithLifecycle()
     val playback by viewModel.playback.collectAsStateWithLifecycle()
+    val selectedName by viewModel.selectedName.collectAsStateWithLifecycle()
+    val selectedSize by viewModel.selectedSize.collectAsStateWithLifecycle()
+    val selectedBitmap by viewModel.selectedBitmap.collectAsStateWithLifecycle()
+    val mediaPage by viewModel.mediaPage.collectAsStateWithLifecycle()
+    val mediaPageCount by viewModel.mediaPageCount.collectAsStateWithLifecycle()
+    val isTimedMedia = MediaKinds.isTimed(playback.kind)
+
+    // Pinch-zoom/pan state for photos and PDF pages; a new item or page starts unzoomed.
+    var zoom by remember(selectedName, mediaPage) { mutableFloatStateOf(1f) }
+    var pan by remember(selectedName, mediaPage) { mutableStateOf(Offset.Zero) }
     val thermalWarning by viewModel.thermalWarning.collectAsStateWithLifecycle()
     val loop by viewModel.loop.collectAsStateWithLifecycle()
     val speed by viewModel.speed.collectAsStateWithLifecycle()
@@ -131,7 +160,7 @@ fun MasterPlayerScreen(
     }
 
     // Overlays stay up while paused; while playing they auto-hide, restarted by every poke().
-    val overlay = rememberOverlayVisibility(playback.playing)
+    val overlay = rememberOverlayVisibility(playback.playing || !isTimedMedia)
 
     // Locally interpolated position so the seek bar moves smoothly between playback updates.
     val duration = playback.durationMs.coerceAtLeast(0L)
@@ -148,15 +177,79 @@ fun MasterPlayerScreen(
 
     PlayerOverlayScaffold(
         visible = overlay.visible,
-        // Hidden overlays: tap reveals them. Shown overlays: tap toggles play/pause.
+        // Hidden overlays: tap reveals them. Shown overlays: tap toggles play/pause for timed media.
         // Either way, restart the auto-hide timer.
         onTap = {
-            if (overlay.visible) togglePlayPause()
+            if (overlay.visible && isTimedMedia) togglePlayPause()
             overlay.poke()
+        },
+        onDoubleTap = {
+            overlay.poke()
+            if (zoom > 1.05f) {
+                zoom = 1f
+                pan = Offset.Zero
+            }
+        },
+        onTransform = { zoomChange, panChange ->
+            val newZoom = (zoom * zoomChange).coerceIn(1f, 5f)
+            zoom = newZoom
+            pan = if (newZoom <= 1.01f) Offset.Zero else pan + panChange
         },
         modifier = Modifier.background(Color.Black),
         video = {
-            if (eglContext == null || videoSource == null) {
+            if (playback.kind == MediaKinds.IMAGE || playback.kind == MediaKinds.PDF) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    val bmp = selectedBitmap
+                    if (bmp != null) {
+                        Image(
+                            bitmap = bmp.asImageBitmap(),
+                            contentDescription = selectedName,
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .graphicsLayer {
+                                    scaleX = zoom
+                                    scaleY = zoom
+                                    translationX = pan.x
+                                    translationY = pan.y
+                                },
+                        )
+                    } else {
+                        CircularProgressIndicator(color = SyncTheme.colors.onScrim)
+                    }
+                }
+            } else if (playback.kind == MediaKinds.AUDIO || playback.kind == MediaKinds.FILE) {
+                // No video surface: a title panel on black (guests see the same, plus their
+                // download progress for a file).
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            MediaKinds.icon(playback.kind),
+                            contentDescription = null,
+                            tint = SyncTheme.colors.onScrim,
+                            modifier = Modifier.size(64.dp),
+                        )
+                        Spacer(Modifier.height(SyncSpacing.m))
+                        Text(
+                            selectedName ?: if (playback.kind == MediaKinds.AUDIO) "Now playing" else "Shared file",
+                            color = SyncTheme.colors.onScrim,
+                            style = MaterialTheme.typography.titleMedium,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(horizontal = SyncSpacing.l),
+                        )
+                        if (playback.kind == MediaKinds.FILE) {
+                            Spacer(Modifier.height(SyncSpacing.xs))
+                            Text(
+                                "${formatByteSize(selectedSize)} · guests are receiving it and can save it",
+                                color = SyncTheme.colors.onScrimMuted,
+                                style = MaterialTheme.typography.bodyMedium,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.padding(horizontal = SyncSpacing.l),
+                            )
+                        }
+                    }
+                }
+            } else if (eglContext == null || videoSource == null) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(
                         "Preparing stream…",
@@ -237,35 +330,67 @@ fun MasterPlayerScreen(
             GuestAvatarRow(clients.map { it.deviceName })
         },
         bottomBar = {
-            SeekBar(
-                positionMs = ticked,
-                durationMs = duration,
-                onSeek = { overlay.poke(); viewModel.seekTo(it) },
-                onScrub = overlay::poke,
-            )
-            TransportControls(
-                playing = playback.playing,
-                onPlayPause = { overlay.poke(); togglePlayPause() },
-                onRewind = { overlay.poke(); viewModel.seekTo((playback.positionMs - 10_000L).coerceAtLeast(0L)) },
-                onForward = { overlay.poke(); viewModel.seekTo(playback.positionMs + 10_000L) },
-                extra = {
-                    IconButton(onClick = { overlay.poke(); viewModel.setLoop(!loop) }) {
-                        Icon(
-                            Icons.Filled.Repeat,
-                            contentDescription = "Loop",
-                            tint = if (loop) MaterialTheme.colorScheme.primary else SyncTheme.colors.onScrim,
+            if (isTimedMedia) {
+                SeekBar(
+                    positionMs = ticked,
+                    durationMs = duration,
+                    onSeek = { overlay.poke(); viewModel.seekTo(it) },
+                    onScrub = overlay::poke,
+                )
+                TransportControls(
+                    playing = playback.playing,
+                    onPlayPause = { overlay.poke(); togglePlayPause() },
+                    onRewind = { overlay.poke(); viewModel.seekTo((playback.positionMs - 10_000L).coerceAtLeast(0L)) },
+                    onForward = { overlay.poke(); viewModel.seekTo(playback.positionMs + 10_000L) },
+                    extra = {
+                        IconButton(onClick = { overlay.poke(); viewModel.setLoop(!loop) }) {
+                            Icon(
+                                Icons.Filled.Repeat,
+                                contentDescription = "Loop",
+                                tint = if (loop) MaterialTheme.colorScheme.primary else SyncTheme.colors.onScrim,
+                            )
+                        }
+                        SpeedMenu(speed, onSetSpeed = { overlay.poke(); viewModel.setSpeed(it) })
+                        IconButton(onClick = { overlay.poke(); onBack() }) {
+                            Icon(
+                                Icons.Filled.VideoLibrary,
+                                contentDescription = "Select another media",
+                                tint = SyncTheme.colors.onScrim,
+                            )
+                        }
+                    },
+                )
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        selectedName ?: "Shared media",
+                        color = SyncTheme.colors.onScrim,
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f).padding(end = SyncSpacing.m),
+                    )
+                    if (playback.kind == MediaKinds.PDF && mediaPageCount > 0) {
+                        PageControls(
+                            page = mediaPage,
+                            pageCount = mediaPageCount,
+                            onPrevious = { overlay.poke(); viewModel.previousPage() },
+                            onNext = { overlay.poke(); viewModel.nextPage() },
                         )
                     }
-                    SpeedMenu(speed, onSetSpeed = { overlay.poke(); viewModel.setSpeed(it) })
                     IconButton(onClick = { overlay.poke(); onBack() }) {
                         Icon(
                             Icons.Filled.VideoLibrary,
-                            contentDescription = "Select another video",
+                            contentDescription = "Select another media",
                             tint = SyncTheme.colors.onScrim,
                         )
                     }
-                },
-            )
+                }
+            }
         },
     )
 
@@ -274,7 +399,7 @@ fun MasterPlayerScreen(
             endpoint = endpoint,
             pin = pin,
             guests = clients.map { it.deviceName },
-            playing = playback.playing,
+            playing = playback.playing || !isTimedMedia,
             onPlayForEveryone = { viewModel.play(); showInvite = false },
             onEndRoom = { showInvite = false; onEndRoom() },
             onDismiss = { showInvite = false },

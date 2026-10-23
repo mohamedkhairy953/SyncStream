@@ -5,15 +5,20 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
+import android.os.Build
 import android.view.SurfaceHolder
 import android.view.ViewGroup
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -27,11 +32,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -48,18 +56,25 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.syncstream.core.PeerState
+import com.syncstream.core.formatByteSize
 import com.syncstream.signaling.ConnectionState
 import com.syncstream.sync.PlayheadInfo
+import com.syncstream.ui.components.MediaKinds
+import com.syncstream.ui.components.PageControls
 import com.syncstream.ui.components.PlayerOverlayScaffold
 import com.syncstream.ui.components.PrimaryButton
 import com.syncstream.ui.components.SecondaryButton
@@ -85,6 +100,8 @@ private const val MAX_ZOOM = 5f
 private val CenterPlaySize = 76.dp
 private val CenterPlayIconSize = 44.dp
 private val SpinnerSize = 40.dp
+private val CenterIconSize = 56.dp
+private val DownloadBarWidth = 220.dp
 
 /**
  * Guest · Watch. Full-bleed viewer: renders the master's video track into a [SurfaceViewRenderer]
@@ -104,6 +121,26 @@ fun ClientScreen(viewModel: ClientViewModel, onLeave: () -> Unit) {
     val muted by viewModel.muted.collectAsStateWithLifecycle()
     val latencyMs by viewModel.latencyBadgeMs.collectAsStateWithLifecycle()
     val remoteTrack by viewModel.remoteVideoTrack.collectAsStateWithLifecycle()
+    val sharedBitmap by viewModel.sharedBitmap.collectAsStateWithLifecycle()
+    val mediaDownloading by viewModel.mediaDownloading.collectAsStateWithLifecycle()
+    val mediaProgress by viewModel.mediaProgress.collectAsStateWithLifecycle()
+    val sharedFile by viewModel.sharedFile.collectAsStateWithLifecycle()
+    val saveState by viewModel.saveState.collectAsStateWithLifecycle()
+    val isTimedMedia = MediaKinds.isTimed(playhead.mediaKind)
+    val isPictured = playhead.mediaKind == MediaKinds.IMAGE || playhead.mediaKind == MediaKinds.PDF
+
+    // Pre-Q devices have no permission-free MediaStore Downloads insert: save through a SAF
+    // "create document" picker instead (the ViewModel copies into whatever the guest chose).
+    val createDocumentLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("*/*"),
+    ) { uri -> uri?.let { viewModel.saveSharedFileTo(it) } }
+    val saveFile = {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            viewModel.saveSharedFile()
+        } else {
+            createDocumentLauncher.launch(playhead.mediaTitle ?: "shared-file")
+        }
+    }
 
     val eglContext = remember { viewModel.eglContext }
     val currentRoom by viewModel.currentRoom.collectAsStateWithLifecycle()
@@ -115,11 +152,11 @@ fun ClientScreen(viewModel: ClientViewModel, onLeave: () -> Unit) {
     }
     BackHandler(onBack = leave)
 
-    // Keep the screen awake (no dim) only while the master is actively playing. Pause / end / leave
-    // releases the flag so the device can dim normally.
+    // Keep the screen awake while the master is actively playing or presenting a static item.
     val view = LocalView.current
-    DisposableEffect(playhead.playing) {
-        view.keepScreenOn = playhead.playing
+    val keepAwake = playhead.playing || !isTimedMedia
+    DisposableEffect(keepAwake) {
+        view.keepScreenOn = keepAwake
         onDispose { view.keepScreenOn = false }
     }
 
@@ -195,11 +232,14 @@ fun ClientScreen(viewModel: ClientViewModel, onLeave: () -> Unit) {
         zoom = 1f
         pan = Offset.Zero
     }
+    LaunchedEffect(playhead.mediaId, playhead.mediaPage) {
+        resetZoom()
+    }
 
     PlayerOverlayScaffold(
         visible = overlay.visible,
         onTap = {
-            if (overlay.visible && live) {
+            if (overlay.visible && live && isTimedMedia) {
                 onControl()
                 togglePlayPause()
             } else {
@@ -217,14 +257,36 @@ fun ClientScreen(viewModel: ClientViewModel, onLeave: () -> Unit) {
         },
         modifier = Modifier.background(Color.Black),
         video = {
-            VideoSurface(
-                eglContext = eglContext,
-                track = remoteTrack,
-                videoAspect = videoAspect,
-                onVideoAspectChanged = { videoAspect = it },
-                zoom = zoom,
-                pan = pan,
-            )
+            when {
+                isPictured -> {
+                    val bmp = sharedBitmap
+                    if (bmp != null) {
+                        Image(
+                            bitmap = bmp.asImageBitmap(),
+                            contentDescription = playhead.mediaTitle,
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .graphicsLayer {
+                                    scaleX = zoom
+                                    scaleY = zoom
+                                    translationX = pan.x
+                                    translationY = pan.y
+                                },
+                        )
+                    }
+                }
+                playhead.mediaKind == MediaKinds.VIDEO -> {
+                    VideoSurface(
+                        eglContext = eglContext,
+                        track = remoteTrack,
+                        videoAspect = videoAspect,
+                        onVideoAspectChanged = { videoAspect = it },
+                        zoom = zoom,
+                        pan = pan,
+                    )
+                }
+            }
         },
         topBar = {
             IconButton(onClick = leave) {
@@ -254,34 +316,69 @@ fun ClientScreen(viewModel: ClientViewModel, onLeave: () -> Unit) {
                     tint = SyncTheme.colors.onScrim,
                 )
             }
-            Spacer(Modifier.width(SyncSpacing.s))
-            SoundPill(muted = muted, onToggle = { overlay.poke(); viewModel.setMuted(!muted) })
-            Spacer(Modifier.width(SyncSpacing.s))
-            SpeedMenu(speed = playhead.speed, onSetSpeed = { onControl(); viewModel.setSpeed(it) })
+            if (isTimedMedia) {
+                Spacer(Modifier.width(SyncSpacing.s))
+                SoundPill(muted = muted, onToggle = { overlay.poke(); viewModel.setMuted(!muted) })
+                Spacer(Modifier.width(SyncSpacing.s))
+                SpeedMenu(speed = playhead.speed, onSetSpeed = { onControl(); viewModel.setSpeed(it) })
+            }
         },
         bottomBar = {
             if (!live) return@PlayerOverlayScaffold
-            val position = rememberTickedPosition(playhead)
-            SeekBar(
-                positionMs = position,
-                durationMs = playhead.durationMs.coerceAtLeast(0L),
-                onSeek = { onControl(); viewModel.seekTo(it) },
-                onScrub = overlay::poke,
-            )
-            TransportControls(
-                playing = playhead.playing,
-                onPlayPause = { onControl(); togglePlayPause() },
-                onRewind = { onControl(); viewModel.seekTo((playhead.positionMs - SEEK_STEP_MS).coerceAtLeast(0L)) },
-                onForward = { onControl(); viewModel.seekTo(playhead.positionMs + SEEK_STEP_MS) },
-            )
-            if (hintVisible) {
-                Text(
-                    "Pausing pauses for everyone",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = SyncTheme.colors.onScrimMuted,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.fillMaxWidth().padding(top = SyncSpacing.xs),
+            if (isTimedMedia) {
+                val position = rememberTickedPosition(playhead)
+                SeekBar(
+                    positionMs = position,
+                    durationMs = playhead.durationMs.coerceAtLeast(0L),
+                    onSeek = { onControl(); viewModel.seekTo(it) },
+                    onScrub = overlay::poke,
                 )
+                TransportControls(
+                    playing = playhead.playing,
+                    onPlayPause = { onControl(); togglePlayPause() },
+                    onRewind = { onControl(); viewModel.seekTo((playhead.positionMs - SEEK_STEP_MS).coerceAtLeast(0L)) },
+                    onForward = { onControl(); viewModel.seekTo(playhead.positionMs + SEEK_STEP_MS) },
+                )
+                if (hintVisible) {
+                    Text(
+                        "Pausing pauses for everyone",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = SyncTheme.colors.onScrimMuted,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth().padding(top = SyncSpacing.xs),
+                    )
+                }
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        playhead.mediaTitle ?: "Shared ${MediaKinds.noun(playhead.mediaKind)}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = SyncTheme.colors.onScrim,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (playhead.mediaKind == MediaKinds.PDF && playhead.mediaPageCount > 0) {
+                        PageControls(
+                            page = playhead.mediaPage,
+                            pageCount = playhead.mediaPageCount,
+                            onPrevious = { onControl(); viewModel.previousPage() },
+                            onNext = { onControl(); viewModel.nextPage() },
+                        )
+                    }
+                }
+                if (hintVisible && playhead.mediaKind == MediaKinds.PDF) {
+                    Text(
+                        "Turning the page turns it for everyone",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = SyncTheme.colors.onScrimMuted,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth().padding(top = SyncSpacing.xs),
+                    )
+                }
             }
         },
         centerContent = {
@@ -306,9 +403,63 @@ fun ClientScreen(viewModel: ClientViewModel, onLeave: () -> Unit) {
                     spinner = true,
                 )
 
+                isPictured -> {
+                    if (sharedBitmap == null) {
+                        val noun = MediaKinds.noun(playhead.mediaKind)
+                        CenterMessage(
+                            title = playhead.mediaTitle ?: "Loading $noun…",
+                            body = if (mediaDownloading) "Receiving the full-quality $noun from $label…" else "Waiting for the $noun…",
+                            dim = false,
+                            spinner = mediaDownloading,
+                        ) { DownloadBar(mediaDownloading, mediaProgress) }
+                    }
+                }
+
+                playhead.mediaKind == MediaKinds.FILE -> CenterMessage(
+                    title = playhead.mediaTitle ?: "Shared file",
+                    body = when {
+                        sharedFile != null -> "${formatByteSize(playhead.mediaSize)} · received from $label"
+                        mediaDownloading -> "${formatByteSize(playhead.mediaSize)} · receiving from $label…"
+                        else -> "${formatByteSize(playhead.mediaSize)} · waiting for $label"
+                    },
+                    dim = false,
+                    icon = MediaKinds.icon(MediaKinds.FILE),
+                ) {
+                    when {
+                        sharedFile == null -> DownloadBar(mediaDownloading, mediaProgress)
+                        saveState is SaveState.Saving -> CircularProgressIndicator(
+                            color = SyncTheme.colors.onScrim,
+                            modifier = Modifier.size(SpinnerSize),
+                        )
+                        saveState is SaveState.Saved -> StatusPill(
+                            "Saved to Downloads",
+                            tone = StatusTone.Success,
+                            icon = Icons.Filled.Check,
+                        )
+                        else -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            if (saveState is SaveState.Failed) {
+                                Text(
+                                    "Couldn't save the file",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = SyncTheme.colors.onScrimMuted,
+                                )
+                                Spacer(Modifier.size(SyncSpacing.s))
+                            }
+                            PrimaryButton("Save to device", onClick = saveFile, icon = Icons.Filled.Download)
+                        }
+                    }
+                }
+
+                playhead.mediaKind == MediaKinds.AUDIO -> CenterMessage(
+                    title = playhead.mediaTitle ?: "Now playing",
+                    body = "Audio — everyone hears the same moment",
+                    dim = false,
+                    icon = MediaKinds.icon(MediaKinds.AUDIO),
+                ) { SoundPill(muted = muted, onToggle = { viewModel.setMuted(!muted) }) }
+
                 remoteTrack == null -> CenterMessage(
                     title = "You're in $label's room",
-                    body = "Waiting for the host to pick a video",
+                    body = "Waiting for the host to pick media",
                     dim = false,
                 ) { SoundPill(muted = muted, onToggle = { viewModel.setMuted(!muted) }) }
 
@@ -449,12 +600,34 @@ private fun SoundPill(muted: Boolean, onToggle: () -> Unit) {
     )
 }
 
+/** Transfer progress under a centre message: determinate when the host sent a size. */
+@Composable
+private fun DownloadBar(downloading: Boolean, progress: Float) {
+    if (!downloading) return
+    val colors = SyncTheme.colors
+    if (progress >= 0f) {
+        LinearProgressIndicator(
+            progress = { progress },
+            color = colors.onScrim,
+            trackColor = colors.onScrimMuted.copy(alpha = 0.3f),
+            modifier = Modifier.width(DownloadBarWidth),
+        )
+    } else {
+        LinearProgressIndicator(
+            color = colors.onScrim,
+            trackColor = colors.onScrimMuted.copy(alpha = 0.3f),
+            modifier = Modifier.width(DownloadBarWidth),
+        )
+    }
+}
+
 @Composable
 private fun CenterMessage(
     title: String,
     body: String?,
     dim: Boolean,
     spinner: Boolean = false,
+    icon: ImageVector? = null,
     action: (@Composable () -> Unit)? = null,
 ) {
     val colors = SyncTheme.colors
@@ -471,6 +644,9 @@ private fun CenterMessage(
         ) {
             if (spinner) {
                 CircularProgressIndicator(color = colors.onScrim, modifier = Modifier.size(SpinnerSize))
+                Spacer(Modifier.size(SyncSpacing.s))
+            } else if (icon != null) {
+                Icon(icon, contentDescription = null, tint = colors.onScrim, modifier = Modifier.size(CenterIconSize))
                 Spacer(Modifier.size(SyncSpacing.s))
             }
             Text(title, style = MaterialTheme.typography.titleMedium, color = colors.onScrim, textAlign = TextAlign.Center)

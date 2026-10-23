@@ -1,10 +1,18 @@
 package com.syncstream.signaling
 
 import android.util.Log
+import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpStatusCode
+import io.ktor.server.application.call
 import io.ktor.server.application.install
 import io.ktor.server.cio.CIO
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
+import io.ktor.server.response.header
+import io.ktor.server.response.respond
+import io.ktor.server.response.respondOutputStream
+import io.ktor.server.routing.get
 import io.ktor.server.routing.routing
 import io.ktor.server.websocket.WebSockets
 import io.ktor.server.websocket.webSocket
@@ -14,6 +22,7 @@ import io.ktor.websocket.WebSocketSession
 import io.ktor.websocket.close
 import io.ktor.websocket.readText
 import io.ktor.websocket.send
+import java.io.InputStream
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.ClosedReceiveChannelException
 import kotlinx.coroutines.runBlocking
@@ -37,6 +46,19 @@ import kotlin.time.Duration.Companion.seconds
  * Master is always the offerer, so outbound messages are Offer / Ice / Bye; inbound are
  * Hello / Answer / Ice / Bye.
  */
+/**
+ * Streamable media payload exposed over `GET /media` on the master's signaling server.
+ * [openStream] returns a fresh [InputStream] per request so multiple guests can download
+ * concurrently without buffering the whole file in RAM.
+ */
+data class MediaPayload(
+    val id: String,
+    val name: String,
+    val mimeType: String,
+    val sizeBytes: Long,
+    val openStream: () -> InputStream?,
+)
+
 class SignalingServer(
     private val pin: String,
     private val masterName: String,
@@ -44,6 +66,13 @@ class SignalingServer(
     private val callbacks: Callbacks,
     private val scope: CoroutineScope,
 ) {
+
+    /**
+     * Currently shared non-video payload (photo, PDF, generic file) served at `GET /media`.
+     * Updated by the master whenever a new presentation item is picked.
+     */
+    @Volatile
+    var currentMedia: MediaPayload? = null
 
     interface Callbacks {
         /**
@@ -93,6 +122,59 @@ class SignalingServer(
             }
             routing {
                 webSocket(ROUTE) { handleSession(this) }
+                get(MEDIA_ROUTE) {
+                    val reqPin = call.request.queryParameters["pin"]
+                    val reqSession = call.request.queryParameters["sessionId"]
+                    val authed = (reqPin == pin) || (reqSession != null && outbounds.containsKey(reqSession))
+                    if (!authed) {
+                        call.respond(HttpStatusCode.Forbidden, "bad pin")
+                        return@get
+                    }
+                    val payload = currentMedia
+                    val reqId = call.request.queryParameters["id"]
+                    if (payload == null || (reqId != null && reqId != payload.id)) {
+                        call.respond(HttpStatusCode.NotFound, "no media")
+                        return@get
+                    }
+                    val safeName = payload.name.replace("\"", "")
+                    call.response.header(
+                        HttpHeaders.ContentDisposition,
+                        "inline; filename=\"$safeName\"",
+                    )
+                    call.response.header(HttpHeaders.AcceptRanges, "bytes")
+                    val ct = runCatching { ContentType.parse(payload.mimeType) }
+                        .getOrDefault(ContentType.Application.OctetStream)
+                    val total = payload.sizeBytes.takeIf { it >= 0L }
+                    // Single `bytes=start-[end]` range (resume after a dropped transfer). Only
+                    // honoured when the size is known; anything else falls back to the full body.
+                    val range = call.request.headers[HttpHeaders.Range]
+                        ?.let { parseByteRange(it, total) }
+                    if (range != null && total != null) {
+                        val (start, end) = range
+                        if (start >= total) {
+                            call.response.header(HttpHeaders.ContentRange, "bytes */$total")
+                            call.respond(HttpStatusCode.RequestedRangeNotSatisfiable)
+                            return@get
+                        }
+                        call.response.header(HttpHeaders.ContentRange, "bytes $start-$end/$total")
+                        call.respondOutputStream(
+                            contentType = ct,
+                            status = HttpStatusCode.PartialContent,
+                            contentLength = end - start + 1,
+                        ) {
+                            payload.openStream()?.use { input ->
+                                input.skipFully(start)
+                                input.copyRange(this, end - start + 1)
+                            }
+                        }
+                        return@get
+                    }
+                    call.respondOutputStream(contentType = ct, contentLength = total) {
+                        payload.openStream()?.use { input ->
+                            input.copyTo(this, bufferSize = COPY_BUFFER)
+                        }
+                    }
+                }
             }
         }
         engine.start(wait = false)
@@ -221,9 +303,56 @@ class SignalingServer(
     private fun boundPort(engine: EmbeddedServer<*, *>): Int =
         runBlocking { engine.engine.resolvedConnectors().first().port }
 
+    /**
+     * Parses `bytes=start-end` / `bytes=start-` into an inclusive `(start, end)` pair clamped to
+     * [total]; null for anything else (multi-range, suffix ranges, garbage) so the caller serves
+     * the whole body instead.
+     */
+    private fun parseByteRange(header: String, total: Long?): Pair<Long, Long>? {
+        if (total == null || !header.startsWith("bytes=")) return null
+        val spec = header.removePrefix("bytes=").trim()
+        if (spec.contains(',')) return null
+        val dash = spec.indexOf('-')
+        if (dash <= 0) return null
+        val start = spec.substring(0, dash).toLongOrNull() ?: return null
+        val endPart = spec.substring(dash + 1)
+        val end = if (endPart.isBlank()) total - 1 else (endPart.toLongOrNull() ?: return null)
+        if (start < 0 || end < start) return null
+        return start to minOf(end, total - 1)
+    }
+
     private companion object {
         const val TAG = "SignalingServer"
         const val ROUTE = "/ws"
+        const val MEDIA_ROUTE = "/media"
+        const val COPY_BUFFER = 64 * 1024
+
+        /** [InputStream.skip] may skip fewer bytes than asked; loop (and read) until done. */
+        fun InputStream.skipFully(count: Long) {
+            var remaining = count
+            while (remaining > 0) {
+                val skipped = skip(remaining)
+                if (skipped > 0) {
+                    remaining -= skipped
+                } else if (read() < 0) {
+                    return
+                } else {
+                    remaining -= 1
+                }
+            }
+        }
+
+        /** Copies exactly [count] bytes (or until EOF) from this stream to [out]. */
+        fun InputStream.copyRange(out: java.io.OutputStream, count: Long) {
+            val buf = ByteArray(COPY_BUFFER)
+            var remaining = count
+            while (remaining > 0) {
+                val n = read(buf, 0, minOf(buf.size.toLong(), remaining).toInt())
+                if (n < 0) break
+                out.write(buf, 0, n)
+                remaining -= n
+            }
+        }
         const val BIND_HOST = "0.0.0.0"
         const val BAD_PIN = "bad pin"
         const val FULL = "session full"

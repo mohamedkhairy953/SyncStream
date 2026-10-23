@@ -12,4 +12,6 @@ dependencies {
     api(libs.webrtc.android)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
+
+    testImplementation(libs.junit)
 }

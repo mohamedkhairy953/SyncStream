@@ -4,7 +4,7 @@ This document is the binding API contract for all phase-2 work. Five parallel ag
 implement against these signatures **without coordinating**. Do not change a public
 signature here without updating this file. Foundation files already written (do not
 redefine): `signaling/SignalMessage.kt` (`SignalMessage` sealed type + `SignalJson`),
-`sync/SyncMessage.kt` (`SyncMessage` sealed type + `SyncJson`, including client-to-master `PlayReq`/`PauseReq`/`SeekReq`), `webrtc/RtcConfigs.kt`,
+`sync/SyncMessage.kt` (`SyncMessage` sealed type + `SyncJson`, including master-to-client `ShowPage` and client-to-master `PlayReq`/`PauseReq`/`SeekReq`/`SpeedReq`/`PageReq`), `webrtc/RtcConfigs.kt`,
 `ui/theme/Theme.kt` (`SyncStreamTheme`), `SyncStreamApp`, `AppContainer`, `MainActivity`.
 
 ## Dependency direction (acyclic — enforce strictly)
@@ -57,6 +57,14 @@ object JoinLink {
     fun buildCode(host: String, port: Int, pin: String): String  // "host:port:pin" (TV-typeable)
     fun parseCode(text: String): JoinInfo?                     // accepts the URI OR "host:port:pin"
 }
+```
+
+### Shared helpers
+```kotlin
+fun formatByteSize(bytes: Long): String   // "512 B", "3.4 KB", "12.0 MB"; "–" for negative/unknown
+// 0-based page of a PdfRenderer onto a white ARGB bitmap, longest side ≤ maxDim. Caller holds
+// the lock (PdfRenderer: one open page at a time, not thread-safe). Null when out of range/fails.
+fun renderPdfPage(renderer: PdfRenderer, page: Int, maxDim: Int = 2048): Bitmap?
 ```
 
 ---
@@ -180,10 +188,25 @@ fun stop()
 suspend fun sendOffer(sessionId: String, sdp: String)
 suspend fun sendIce(sessionId: String, sdpMid: String?, sdpMLineIndex: Int, candidate: String)
 suspend fun sendBye(sessionId: String, reason: String?)
+
+// Payload served at GET /media (photos, PDFs, generic files). Set by the service on every pick.
+@Volatile var currentMedia: MediaPayload?
+```
+```kotlin
+// Streamed from a fresh InputStream per request, so several guests can download concurrently
+// without the master buffering the file in RAM.
+data class MediaPayload(val id: String, val name: String, val mimeType: String,
+    val sizeBytes: Long /* -1 unknown */, val openStream: () -> InputStream?)
 ```
 Behavior: validates `Hello.pin` == `pin`; wrong PIN -> `Bye("bad pin")` + close. Generates a
 `sessionId` (or reuses `Hello.clientId` on reconnect, signalling `isReconnect=true`). Uses
 `SignalJson` for (de)serialization.
+
+`GET /media?pin=<pin>&id=<mediaId>[&sessionId=<id>]` on the same port: authorised by the PIN or
+a live session id (else 403); 404 when nothing is shared or `id` ≠ `currentMedia.id`. Responds
+with `Content-Type`, `Content-Disposition: inline; filename=…`, `Accept-Ranges: bytes` and, when
+the size is known, `Content-Length`. A single `Range: bytes=start-[end]` is honoured with 206 +
+`Content-Range` (416 past the end); multi-range or unknown-size requests get the full body.
 
 ### `SignalingClient`
 ```kotlin
@@ -211,6 +234,12 @@ fun disconnect(reason: String? = null)
 
 suspend fun sendAnswer(sdp: String)
 suspend fun sendIce(sdpMid: String?, sdpMLineIndex: Int, candidate: String)
+
+// GET /media on the master into destFile (64 KB chunks on Dispatchers.IO, never in RAM).
+// onProgress(bytesRead, totalBytes /* -1 unknown */). A leftover destFile.part is resumed with a
+// Range request (206) or restarted (200). True once the whole payload is in destFile.
+suspend fun downloadMedia(mediaId: String, destFile: File,
+    onProgress: (bytesRead: Long, totalBytes: Long) -> Unit = { _, _ -> }): Boolean
 
 val connection: StateFlow<ConnectionState>   // Disconnected | Connecting | Connected(sessionId) | Rejected(reason)
 ```
@@ -356,9 +385,9 @@ class MasterPlayerController(
 val player: ExoPlayer
 val mediaSession: MediaSession
 
-val playback: StateFlow<PlaybackInfo>    // playing, positionMs, durationMs, ended
+val playback: StateFlow<PlaybackInfo>    // playing, positionMs, durationMs, ended, kind
 
-fun setMediaUri(uri: Uri)                // OpenDocument uri; loads PAUSED at 0 (playWhenReady=false)
+fun setMediaUri(uri: Uri, kind: String = "video")   // OpenDocument uri; loads PAUSED at 0 (playWhenReady=false); kind = presentation type
 fun play()
 fun pause()
 fun seekTo(positionMs: Long)
@@ -376,6 +405,8 @@ data class PlaybackInfo(
     val positionMs: Long,
     val durationMs: Long,
     val ended: Boolean,
+    val speed: Float = 1f,
+    val kind: String = "video",   // presentation type: "video" | "audio" (M1); more in docs/plan-shareable-content.md
 )
 ```
 Behavior: build `ExoPlayer` with a `DefaultAudioSink` chain containing `pcmTap` (Tee/custom
@@ -421,16 +452,23 @@ Behavior: keep 5 lowest-RTT of each burst, take median; `rtt = t2 - t0`,
 
 ### `SyncEngine`
 ```kotlin
-// Master: broadcasts Play/Pause/Seek/End + a State heartbeat (every 1s) on "cmd".
-//   Also observes incoming client requests (PlayReq/PauseReq/SeekReq) and forwards to Callbacks.
+// Master: broadcasts Play/Pause/Seek/ShowPage/End + a State heartbeat (every 1s) on "cmd".
+//   Also observes incoming client requests (PlayReq/PauseReq/SeekReq/SpeedReq/PageReq) and
+//   forwards them to Callbacks.
 // Client: consumes commands and computes the displayed playhead using ClockSync.offset.
-//   Can also send playback requests back to the master on the same channel.
+//   Can also send playback/page requests back to the master on the same channel.
+// State carries the presentation: mediaKind ("video" | "audio" | "image" | "pdf" | "file"),
+//   mediaTitle, mediaId (payload at GET /media), mediaPage/mediaPageCount (0-based PDF page;
+//   0/0 when not paged) and mediaSize (bytes, -1 unknown). All additive with defaults — old
+//   clients ignore them via ignoreUnknownKeys. See docs/plan-shareable-content.md.
 class SyncEngine(private val scope: CoroutineScope)
 
 interface Callbacks {
     fun onClientPlay(positionMs: Long)
     fun onClientPause(positionMs: Long)
     fun onClientSeek(positionMs: Long)
+    fun onClientSpeed(speed: Float)
+    fun onClientPage(page: Int) {}        // default no-op
 }
 
 fun setMasterCallbacks(callbacks: Callbacks?)
@@ -441,7 +479,10 @@ fun unregisterCmdChannel(sessionId: String)
 fun broadcastPlay(positionMs: Long)        // stamps masterClockMs = elapsedRealtime()
 fun broadcastPause(positionMs: Long)
 fun broadcastSeek(positionMs: Long)
-fun broadcastState(playing: Boolean, positionMs: Long, durationMs: Long)   // heartbeat caller every 1s
+fun broadcastState(playing: Boolean, positionMs: Long, durationMs: Long, speed: Float = 1f,
+    mediaKind: String = "video", mediaTitle: String? = null, mediaId: String? = null,
+    mediaPage: Int = 0, mediaPageCount: Int = 0, mediaSize: Long = -1L)   // heartbeat caller every 1s
+fun broadcastShowPage(page: Int)           // immediate page flip; the heartbeat repeats it
 fun broadcastEnd()
 
 // ---- Client side ----
@@ -450,16 +491,26 @@ val clientPlayhead: StateFlow<PlayheadInfo>   // computed display playhead, clam
 fun sendPlayRequest(positionMs: Long)         // client -> master: request play
 fun sendPauseRequest(positionMs: Long)        // client -> master: request pause
 fun sendSeekRequest(positionMs: Long)         // client -> master: request seek
+fun sendSpeedRequest(speed: Float)            // client -> master: request speed
+fun sendPageRequest(page: Int)                // client -> master: request PDF page
 ```
 ```kotlin
 data class PlayheadInfo(
     val playing: Boolean,
     val positionMs: Long,    // clamped [0, durationMs]
     val durationMs: Long,
+    val speed: Float = 1f,
+    val mediaKind: String = "video",    // mirrors State.mediaKind
+    val mediaTitle: String? = null,     // mirrors State.mediaTitle
+    val mediaId: String? = null,        // mirrors State.mediaId
+    val mediaPage: Int = 0,             // mirrors State.mediaPage (ShowPage updates it at once)
+    val mediaPageCount: Int = 0,
+    val mediaSize: Long = -1L,
 )
 ```
 Client playhead = `state.positionMs + (if playing) (clientNow + offset - state.masterClockMs)`,
-clamped to `[0, duration]`. Uses `SyncJson`.
+clamped to `[0, duration]`. A `ShowPage` re-publishes the last State with the new page (no clock
+involved). Uses `SyncJson`.
 
 ### `AudioStreamer` (master)
 ```kotlin
@@ -512,15 +563,23 @@ class MasterStreamingService : LifecycleService() {
     val endpoint: StateFlow<String?>              // "ip:port" for manual connect, null when not hosting
     val thermalWarning: StateFlow<Boolean>        // true after SEVERE downscale
     val notificationsDenied: StateFlow<Boolean>
+    val mediaPage: StateFlow<Int>                 // current 0-based PDF page (0 otherwise)
+    val mediaPageCount: StateFlow<Int>            // PDF page count (0 otherwise)
 
     // ---- Commands from UI ----
-    fun setMediaUri(uri: Uri)                     // load paused at 0 + broadcast Seek(0); goes live first if stopped
+    fun setMediaUri(uri: Uri, kind: String = "video", title: String? = null)   // load paused at 0 + broadcast Seek(0); goes live first if stopped; kind/title/id/size/page ride the State heartbeat
+    fun showPage(page: Int)                       // PDF only: clamp, update mediaPage, broadcast ShowPage
     fun startStreaming()                          // start FGS, NSD register, Ktor start, wakelocks; no-op once live
     fun play(); fun pause(); fun seekTo(positionMs: Long)   // main thread
-    fun setLoop(enabled: Boolean)
+    fun setLoop(enabled: Boolean); fun setSpeed(speed: Float)
     fun stopStreaming()                           // teardown in strict reverse order (see below)
 }
 ```
+Every pick publishes a `MediaPayload` (id = hash of the uri, name/mime/size from the
+`ContentResolver`, a fresh `openInputStream` per request) as `SignalingServer.currentMedia`, so
+guests fetch photos, PDFs and files from `GET /media` at original quality; `:webrtc` carries only
+video. Non-timed kinds clear the player (no video frames are streamed). A guest `PageReq` lands in
+`showPage` on the main thread.
 Teardown order (strict): NSD unregister -> `Bye` to all -> close DataChannels -> `pc.close()`
 each -> stop Ktor -> `player.release()` -> `videoSource.release()`. EglBase + factory stay
 app-scoped (never released here). Wires: `SignalingServer.Callbacks` -> `MasterPeerManager`;
@@ -599,7 +658,17 @@ enum class StatusTone { Neutral, Success, Warning }
 @Composable fun rememberOverlayVisibility(playing: Boolean): OverlayVisibility   // .poke() keeps chrome shown
 
 @Composable fun RoomCard(label: String, subtitle: String, onJoin: () -> Unit, modifier: Modifier = Modifier)
-@Composable fun VideoThumbnail(title: String, thumbnail: ImageBitmap?, onClick: () -> Unit, modifier: Modifier = Modifier)
+@Composable fun VideoThumbnail(title: String, thumbnail: ImageBitmap?, onClick: () -> Unit, modifier: Modifier = Modifier,
+    icon: ImageVector = Icons.Filled.Movie)   // icon shown when there is no thumbnail (pass MediaKinds.icon(kind))
+@Composable fun PageControls(page: Int /* 0-based */, pageCount: Int, onPrevious: () -> Unit, onNext: () -> Unit,
+    modifier: Modifier = Modifier)            // "n / total" with prev/next, disabled at the ends
+
+object MediaKinds {   // presentation kinds carried as `mediaKind` (VIDEO, AUDIO, IMAGE, PDF, FILE)
+    fun isTimed(kind: String): Boolean        // video/audio
+    fun icon(kind: String): ImageVector
+    fun noun(kind: String): String            // "video", "song", "photo", "PDF", "file"
+    fun mimeTypes(kind: String): Array<String>   // for ActivityResultContracts.OpenDocument
+}
 
 @Composable fun SeekBar(positionMs: Long, durationMs: Long, onSeek: (Long) -> Unit, modifier: Modifier = Modifier,
     onScrub: () -> Unit = {})
@@ -641,14 +710,19 @@ class MasterViewModel(app: Application) : AndroidViewModel(app) {
     val thermalWarning: StateFlow<Boolean>
     val notificationsDenied: StateFlow<Boolean>
     val selectedUri: StateFlow<Uri?>
+    val selectedName: StateFlow<String?>                 // display name of the selection
+    val selectedSize: StateFlow<Long>                    // bytes, -1 unknown (file presentation)
+    val selectedBitmap: StateFlow<Bitmap?>               // decoded photo or rendered current PDF page (≤2048 px)
+    val mediaPage: StateFlow<Int>; val mediaPageCount: StateFlow<Int>   // mirror the service
     val loop: StateFlow<Boolean>
     val speed: StateFlow<Float>
-    val recentVideos: StateFlow<List<RecentVideo>>   // last 10 streamed videos, newest first
+    val recentVideos: StateFlow<List<RecentVideo>>       // last 10 shared items (any kind), newest first
 
     fun bind()
     fun unbind()
-    fun onMediaPicked(uri: Uri)          // takePersistableUriPermission + service.setMediaUri (loads paused)
-    fun playRecent(recent: RecentVideo)  // re-select a video from recentVideos
+    fun onMediaPicked(uri: Uri, kind: String = "video")  // takePersistableUriPermission + service.setMediaUri (loads paused)
+    fun playRecent(recent: RecentVideo)                  // re-select an item from recentVideos (its recorded kind)
+    fun showPage(page: Int); fun nextPage(); fun previousPage()   // PDF page for everyone
     fun startStreaming()                 // idempotent; does not reload media
     fun stopStreaming()
     fun play(); fun pause(); fun seekTo(positionMs: Long)
@@ -656,18 +730,23 @@ class MasterViewModel(app: Application) : AndroidViewModel(app) {
     fun setSpeed(speed: Float)
 }
 ```
-`RecentVideo(uri: String, name: String)` lives in `com.syncstream.ui.master` (persisted by
-`RecentVideosStore` in SharedPreferences). A video is recorded the first time playback starts for
-it ("streaming actually starts"); re-streaming promotes it to the front, capped at 10.
+`RecentVideo(uri: String, name: String, kind: String = "video")` lives in
+`com.syncstream.ui.master` (persisted by `RecentVideosStore` in SharedPreferences). A timed item
+is recorded the first time playback starts for it ("streaming actually starts"); a photo, PDF or
+file is recorded when picked. Re-sharing promotes it to the front, capped at 10. The ViewModel
+renders the host's own view of a picked PDF with `PdfRenderer` (one page at a time, under a
+mutex, via `com.syncstream.core.renderPdfPage`) and re-renders whenever `mediaPage` changes,
+including flips requested by guests.
 
 ### `HostPickScreen`
 ```kotlin
 @Composable
 fun HostPickScreen(viewModel: MasterViewModel, onVideoChosen: () -> Unit, onEndRoom: () -> Unit)
 ```
-Pick-a-video step. The room is live as soon as the screen binds (the 4-digit room code is `pin`).
-Shows recents (`VideoThumbnail`) and a pick-from-device action; choosing a
-video calls `onVideoChosen`. The `RoomChip` opens `InviteSheet` (internal, it does not auto-open
+Pick-media step. The room is live as soon as the screen binds (the 4-digit room code is `pin`).
+Shows recents (`VideoThumbnail` with the kind's icon) and one pick-from-device button per kind
+(Video, Audio, Photo, PDF, File — all through `OpenDocument`, no storage permission); choosing
+anything calls `onVideoChosen`. The `RoomChip` opens `InviteSheet` (internal, it does not auto-open
 here):
 ```kotlin
 @Composable internal fun InviteSheet(endpoint: String?, pin: String, guests: List<String>,
@@ -687,6 +766,10 @@ auto-opens once on first composition while no guest has joined and nothing is pl
 `GuestAvatarRow`, `SeekBar`, `TransportControls` with `SpeedMenu` (0.5–2x), loop toggle and a
 video-library button (which calls `onBack` to return to the picker). `onBack` returns to `HostPickScreen` without
 stopping the room; `onEndRoom` ends it (the caller stops streaming and pops to `home`).
+The video slot branches on `playback.kind`: video → preview surface; audio / file → icon + title
+panel (a file also shows its size); image / pdf → `selectedBitmap` with pinch-zoom/pan (double-tap
+resets). Non-timed kinds replace the transport with the title plus, for a PDF, `PageControls`;
+their overlays never auto-hide.
 
 ## Package `com.syncstream.ui.client`
 
@@ -751,6 +834,13 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
     val joinStatus: StateFlow<JoinStatus>     // Idle | Trying | Done(MatchResult)
     val currentRoom: StateFlow<RoomTarget?>
 
+    // Discrete presentations (playhead.mediaKind image / pdf / file), fetched from GET /media:
+    val sharedBitmap: StateFlow<Bitmap?>      // decoded photo or rendered current PDF page
+    val mediaDownloading: StateFlow<Boolean>
+    val mediaProgress: StateFlow<Float>       // 0..1 while downloading; -1 when the size is unknown
+    val sharedFile: StateFlow<File?>          // the received file (kind "file"), null until complete
+    val saveState: StateFlow<SaveState>       // Idle | Saving | Saved(name) | Failed
+
     fun startDiscovery(); fun stopDiscovery()
     fun joinWithCode(code: String, rooms: List<RoomTarget>)   // RoomCodeMatcher over the rooms
     fun joinDirect(room: RoomTarget, pin: String)             // QR / host:port:pin, PIN known
@@ -760,11 +850,18 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
     fun setMuted(muted: Boolean)
     fun play(); fun pause(); fun seekTo(positionMs: Long)   // PlayReq/PauseReq/SeekReq to the host
     fun setSpeed(speed: Float)
+    fun showPage(page: Int); fun nextPage(); fun previousPage()   // PageReq to the host
+    fun saveSharedFile()                      // API 29+: MediaStore.Downloads insert (no permission)
+    fun saveSharedFileTo(target: Uri)         // < 29: copy into a SAF-created document
 }
 ```
 The session holds a `MulticastLock` during `connect` so the master's `.local` host ICE candidates
 resolve. Latency badge = delta-sampled `(ΔjitterBufferDelay / ΔjitterBufferEmittedCount)` from
 `pc.getStats` inbound-rtp + `rtt/2`, polled every 2s. `onCleared` tears the connection down.
+A new `playhead.mediaId` of a discrete kind downloads the payload into `cacheDir/shared_<id>`
+(cached per id; resumable) and then decodes the photo, opens a `PdfRenderer` over the copy (pages
+rendered on `mediaPage` changes), or exposes the file. Switching back to timed media clears all of
+it.
 
 ### `ClientScreen`
 ```kotlin
@@ -775,8 +872,12 @@ The guest watch screen on `PlayerOverlayScaffold`: renders `remoteVideoTrack` in
 `SurfaceViewRenderer` (init once with shared `EglBase.eglBaseContext`; `DisposableEffect` removes
 the sink THEN releases the renderer). Shows the room name, a **Synced** `StatusPill`, a sound
 toggle (default muted), connection/ended overlays and auto-hiding transport controls (play/pause,
-`SeekBar`, +/-10s, `SpeedMenu`); everyone can control playback. Keeps the screen awake only while
-`playhead.playing`. The back arrow disconnects, then calls `onLeave`.
+`SeekBar`, +/-10s, `SpeedMenu`); everyone can control playback. Keeps the screen awake while
+`playhead.playing` or a discrete item is shown. The back arrow disconnects, then calls `onLeave`.
+Branches on `playhead.mediaKind`: audio → "now playing" panel with the transport; image / pdf →
+`sharedBitmap` with pinch-zoom/pan (and `PageControls` for a PDF — turning the page turns it for
+everyone); file → name, size and transfer progress, then **Save to device**. While a payload is
+downloading the centre shows a determinate progress bar when the host sent the size.
 
 ---
 

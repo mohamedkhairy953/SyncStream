@@ -11,3 +11,9 @@ build/
 keystore.properties
 *.keystore
 *.jks
+
+# Local Wi-Fi ADB lab devices
+/tools/wifi-adb-devices.json
+
+# Claude Code agent worktrees (nested checkouts, never project files)
+/.claude/worktrees/

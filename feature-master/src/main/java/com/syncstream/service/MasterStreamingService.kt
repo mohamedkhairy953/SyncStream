@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Binder
@@ -15,6 +16,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.provider.OpenableColumns
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.getSystemService
@@ -30,6 +32,7 @@ import com.syncstream.webrtc.ExoSurfaceVideoSource
 import com.syncstream.signaling.ClientHandle
 import com.syncstream.signaling.ClientRegistry
 import com.syncstream.core.PeerState
+import com.syncstream.signaling.MediaPayload
 import com.syncstream.signaling.SignalingServer
 import com.syncstream.sync.AudioStreamer
 import com.syncstream.sync.ClockSync
@@ -144,6 +147,18 @@ class MasterStreamingService : LifecycleService() {
     fun videoSourceProvider(): ExoSurfaceVideoSource? = videoSource
 
     private var pendingUri: Uri? = null
+    private var pendingKind: String = "video"
+    private var pendingTitle: String? = null
+    private var pendingId: String? = null
+    private var pendingSize: Long = -1L
+
+    /** Current 0-based page of a PDF presentation (0 otherwise); mirrored to guests. */
+    private val _mediaPage = MutableStateFlow(0)
+    val mediaPage: StateFlow<Int> = _mediaPage.asStateFlow()
+
+    /** Page count of a PDF presentation (0 for everything else). */
+    private val _mediaPageCount = MutableStateFlow(0)
+    val mediaPageCount: StateFlow<Int> = _mediaPageCount.asStateFlow()
 
     override fun onBind(intent: Intent): IBinder {
         super.onBind(intent)
@@ -178,16 +193,90 @@ class MasterStreamingService : LifecycleService() {
      * (not started yet, or stopped from the notification while the screen stayed bound) it is
      * made live first, which loads [pendingUri]. Guests are told to jump to 0; the Pause for a
      * previously-playing item is broadcast (before the Seek) by the main-thread playback observer.
+     * [kind] is the presentation type ("video", "audio", "image", "pdf" or "file"; see
+     * docs/plan-shareable-content.md) and [title] the display name the guests show. Non-timed
+     * kinds are served to guests from `GET /media` (the player is cleared); a PDF starts on page 0.
      */
-    fun setMediaUri(uri: Uri) {
+    fun setMediaUri(uri: Uri, kind: String = "video", title: String? = null) {
+        val id = uri.toString().hashCode().toUInt().toString(16)
         pendingUri = uri
+        pendingKind = kind
+        pendingTitle = title
+        pendingId = id
+        val payload = buildMediaPayload(uri, id, title, kind)
+        pendingSize = payload.sizeBytes
+        _mediaPage.value = 0
+        _mediaPageCount.value = if (kind == "pdf") countPdfPages(uri) else 0
+        signalingServer?.currentMedia = payload
         if (!started) {
             startStreaming()
             return
         }
         val pc = playerController ?: return
-        pc.setMediaUri(uri)
+        pc.setMediaUri(uri, kind)
         syncEngine?.broadcastSeek(0L)
+        broadcastSnapshot(pc.playback.value)
+    }
+
+    /**
+     * Shows 0-based [page] of the current PDF to the host and every guest (clamped to the page
+     * count; no-op for other kinds). Guests get an immediate ShowPage; the heartbeat repeats it.
+     */
+    fun showPage(page: Int) {
+        val count = _mediaPageCount.value
+        if (pendingKind != "pdf" || count <= 0) return
+        val clamped = page.coerceIn(0, count - 1)
+        if (clamped == _mediaPage.value) return
+        _mediaPage.value = clamped
+        syncEngine?.broadcastShowPage(clamped)
+    }
+
+    /** Broadcasts a State heartbeat for [info] plus the current presentation metadata. */
+    private fun broadcastSnapshot(info: PlaybackInfo, speed: Float = info.speed) {
+        syncEngine?.broadcastState(
+            playing = info.playing,
+            positionMs = info.positionMs,
+            durationMs = info.durationMs,
+            speed = speed,
+            mediaKind = info.kind,
+            mediaTitle = pendingTitle,
+            mediaId = pendingId,
+            mediaPage = _mediaPage.value,
+            mediaPageCount = _mediaPageCount.value,
+            mediaSize = pendingSize,
+        )
+    }
+
+    /** Page count of the PDF at [uri] via [PdfRenderer]; 0 when it can't be opened. */
+    private fun countPdfPages(uri: Uri): Int = runCatching {
+        applicationContext.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+            PdfRenderer(pfd).use { it.pageCount }
+        } ?: 0
+    }.getOrDefault(0)
+
+    private fun buildMediaPayload(uri: Uri, id: String, title: String?, kind: String): MediaPayload {
+        val resolver = applicationContext.contentResolver
+        val defaultMime = when (kind) {
+            "image" -> "image/*"
+            "pdf" -> "application/pdf"
+            "audio" -> "audio/*"
+            "video" -> "video/*"
+            else -> "application/octet-stream"
+        }
+        val mime = runCatching { resolver.getType(uri) }.getOrNull() ?: defaultMime
+        val size = runCatching {
+            resolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { c ->
+                if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else -1L
+            } ?: -1L
+        }.getOrDefault(-1L)
+        val safeName = title ?: uri.lastPathSegment ?: id
+        return MediaPayload(
+            id = id,
+            name = safeName,
+            mimeType = mime,
+            sizeBytes = size,
+            openStream = { runCatching { resolver.openInputStream(uri) }.getOrNull() },
+        )
     }
 
     /**
@@ -269,6 +358,10 @@ class MasterStreamingService : LifecycleService() {
             override fun onClientSpeed(speed: Float) {
                 mainHandler.post { setSpeed(speed) }
             }
+
+            override fun onClientPage(page: Int) {
+                mainHandler.post { showPage(page) }
+            }
         })
 
         val peers = MasterPeerManager(
@@ -297,7 +390,13 @@ class MasterStreamingService : LifecycleService() {
         registerThermalListener()
         observePlayback()
 
-        pendingUri?.let { player.setMediaUri(it) }
+        pendingUri?.let { u ->
+            val id = pendingId ?: u.toString().hashCode().toUInt().toString(16).also { pendingId = it }
+            val payload = buildMediaPayload(u, id, pendingTitle, pendingKind)
+            pendingSize = payload.sizeBytes
+            server.currentMedia = payload
+            player.setMediaUri(u, pendingKind)
+        }
 
         // 1s State heartbeat broadcast to all clients.
         // Runs on main: ExoPlayer may only be touched there, and broadcasting from the same thread
@@ -309,13 +408,7 @@ class MasterStreamingService : LifecycleService() {
                 // Re-sample the live state (this also refreshes [playback] for the host UI, so it
                 // can never stay stale for more than a tick), then broadcast it.
                 pc.refresh()
-                val snapshot = pc.playback.value
-                syncEngine?.broadcastState(
-                    playing = snapshot.playing,
-                    positionMs = snapshot.positionMs,
-                    durationMs = snapshot.durationMs,
-                    speed = snapshot.speed,
-                )
+                broadcastSnapshot(pc.playback.value)
             }
         }
     }
@@ -343,13 +436,7 @@ class MasterStreamingService : LifecycleService() {
     fun setSpeed(speed: Float) {
         val pc = playerController ?: return
         pc.setSpeed(speed)
-        val info = pc.playback.value
-        syncEngine?.broadcastState(
-            playing = info.playing,
-            positionMs = info.positionMs,
-            durationMs = info.durationMs,
-            speed = speed,
-        )
+        broadcastSnapshot(pc.playback.value, speed = speed)
     }
 
     /** Tears down all runtime in strict reverse order. App-scoped EGL/factory persist. */

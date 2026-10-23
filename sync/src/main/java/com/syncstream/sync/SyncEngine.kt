@@ -37,6 +37,9 @@ class SyncEngine(private val scope: CoroutineScope) {
         fun onClientPause(positionMs: Long)
         fun onClientSeek(positionMs: Long)
         fun onClientSpeed(speed: Float)
+
+        /** A guest asked for 0-based PDF [page]; default no-op so timed-only masters ignore it. */
+        fun onClientPage(page: Int) {}
     }
 
     private var masterCallbacks: Callbacks? = null
@@ -71,6 +74,7 @@ class SyncEngine(private val scope: CoroutineScope) {
             is SyncMessage.PauseReq -> masterCallbacks?.onClientPause(message.positionMs)
             is SyncMessage.SeekReq -> masterCallbacks?.onClientSeek(message.positionMs)
             is SyncMessage.SpeedReq -> masterCallbacks?.onClientSpeed(message.speed)
+            is SyncMessage.PageReq -> masterCallbacks?.onClientPage(message.page)
             else -> Unit // master ignores its own broadcast types echoed back
         }
     }
@@ -93,7 +97,18 @@ class SyncEngine(private val scope: CoroutineScope) {
     }
 
     /** Heartbeat (caller ticks every 1 s). Carries the authoritative master playback snapshot. */
-    fun broadcastState(playing: Boolean, positionMs: Long, durationMs: Long, speed: Float = 1f) {
+    fun broadcastState(
+        playing: Boolean,
+        positionMs: Long,
+        durationMs: Long,
+        speed: Float = 1f,
+        mediaKind: String = "video",
+        mediaTitle: String? = null,
+        mediaId: String? = null,
+        mediaPage: Int = 0,
+        mediaPageCount: Int = 0,
+        mediaSize: Long = -1L,
+    ) {
         broadcast(
             SyncMessage.State(
                 playing = playing,
@@ -101,8 +116,19 @@ class SyncEngine(private val scope: CoroutineScope) {
                 masterClockMs = SystemClock.elapsedRealtime(),
                 durationMs = durationMs,
                 speed = speed,
+                mediaKind = mediaKind,
+                mediaTitle = mediaTitle,
+                mediaId = mediaId,
+                mediaPage = mediaPage,
+                mediaPageCount = mediaPageCount,
+                mediaSize = mediaSize,
             ),
         )
+    }
+
+    /** Flip every guest to 0-based PDF [page] now (the heartbeat repeats it for late joiners). */
+    fun broadcastShowPage(page: Int) {
+        broadcast(SyncMessage.ShowPage(page))
     }
 
     fun broadcastEnd() {
@@ -190,6 +216,11 @@ class SyncEngine(private val scope: CoroutineScope) {
         sendToMaster(SyncMessage.SpeedReq(speed))
     }
 
+    /** CLIENT: request the master to show 0-based PDF [page] to everyone. */
+    fun sendPageRequest(page: Int) {
+        sendToMaster(SyncMessage.PageReq(page))
+    }
+
     private fun sendToMaster(message: SyncMessage) {
         val channel = clientChannel ?: return
         if (channel.state() != DataChannel.State.OPEN) return
@@ -225,6 +256,13 @@ class SyncEngine(private val scope: CoroutineScope) {
                 )
                 publishPlayhead(base)
             }
+            is SyncMessage.ShowPage -> {
+                // Page flips never touch the clock: re-publish the last base with the new page.
+                val prev = lastState ?: return
+                val state = prev.copy(mediaPage = message.page)
+                lastState = state
+                publishPlayhead(state)
+            }
             SyncMessage.End -> {
                 ended = true
                 val prev = lastState
@@ -232,11 +270,17 @@ class SyncEngine(private val scope: CoroutineScope) {
                     playing = false,
                     positionMs = prev?.durationMs ?: _clientPlayhead.value.positionMs,
                     durationMs = prev?.durationMs ?: _clientPlayhead.value.durationMs,
+                    mediaKind = prev?.mediaKind ?: "video",
+                    mediaTitle = prev?.mediaTitle,
+                    mediaId = prev?.mediaId,
+                    mediaPage = prev?.mediaPage ?: 0,
+                    mediaPageCount = prev?.mediaPageCount ?: 0,
+                    mediaSize = prev?.mediaSize ?: -1L,
                 )
             }
             is SyncMessage.Ping, is SyncMessage.Pong,
             is SyncMessage.PlayReq, is SyncMessage.PauseReq, is SyncMessage.SeekReq,
-            is SyncMessage.SpeedReq,
+            is SyncMessage.SpeedReq, is SyncMessage.PageReq,
             -> Unit // clock-channel traffic or master-bound requests; ignore on client
         }
     }
@@ -246,12 +290,18 @@ class SyncEngine(private val scope: CoroutineScope) {
      * playhead stays clamped correctly before the next heartbeat arrives.
      */
     private fun synthesizeState(playing: Boolean, positionMs: Long, masterClockMs: Long): SyncMessage.State {
-        val duration = lastState?.durationMs ?: 0L
+        val prev = lastState
         val state = SyncMessage.State(
             playing = playing,
             positionMs = positionMs,
             masterClockMs = masterClockMs,
-            durationMs = duration,
+            durationMs = prev?.durationMs ?: 0L,
+            mediaKind = prev?.mediaKind ?: "video",
+            mediaTitle = prev?.mediaTitle,
+            mediaId = prev?.mediaId,
+            mediaPage = prev?.mediaPage ?: 0,
+            mediaPageCount = prev?.mediaPageCount ?: 0,
+            mediaSize = prev?.mediaSize ?: -1L,
         )
         lastState = state
         return state
@@ -284,6 +334,12 @@ class SyncEngine(private val scope: CoroutineScope) {
             positionMs = clamped,
             durationMs = duration,
             speed = speed,
+            mediaKind = state.mediaKind,
+            mediaTitle = state.mediaTitle,
+            mediaId = state.mediaId,
+            mediaPage = state.mediaPage,
+            mediaPageCount = state.mediaPageCount,
+            mediaSize = state.mediaSize,
         )
     }
 
@@ -305,10 +361,18 @@ class SyncEngine(private val scope: CoroutineScope) {
 
 /**
  * Computed client-side display playhead. [positionMs] is already clamped to `[0, durationMs]`.
+ * The `media*` fields mirror the master's [SyncMessage.State] so the guest UI can branch
+ * (video surface, audio panel, image, paged PDF, downloadable file) and fetch the right payload.
  */
 data class PlayheadInfo(
     val playing: Boolean,
     val positionMs: Long,
     val durationMs: Long,
     val speed: Float = 1f,
+    val mediaKind: String = "video",
+    val mediaTitle: String? = null,
+    val mediaId: String? = null,
+    val mediaPage: Int = 0,
+    val mediaPageCount: Int = 0,
+    val mediaSize: Long = -1L,
 )

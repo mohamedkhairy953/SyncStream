@@ -47,7 +47,17 @@ sealed class SyncMessage {
     @SerialName("Seek")
     data class Seek(val positionMs: Long, val masterClockMs: Long) : SyncMessage()
 
-    /** Master -> client heartbeat (every 1s) describing authoritative playback state. */
+    /**
+     * Master -> client heartbeat (every 1s) describing authoritative playback state.
+     * [mediaKind] identifies the presentation type: "video" (default), "audio", "image", "pdf",
+     * "file" or "none" (room live, nothing loaded). Kept as a plain string so `:sync` stays
+     * decoupled from any presentation model; guests branch their UI on it.
+     *
+     * Discrete presentations ride the same heartbeat so a late joiner lands on the right item:
+     * [mediaId] names the payload served at the master's `GET /media`, [mediaPage]/[mediaPageCount]
+     * the current 0-based PDF page (0/0 when not paged) and [mediaSize] the payload size in bytes
+     * (-1 when unknown or not applicable).
+     */
     @Serializable
     @SerialName("State")
     data class State(
@@ -56,7 +66,18 @@ sealed class SyncMessage {
         val masterClockMs: Long,
         val durationMs: Long,
         val speed: Float = 1f,
+        val mediaKind: String = "video",
+        val mediaTitle: String? = null,
+        val mediaId: String? = null,
+        val mediaPage: Int = 0,
+        val mediaPageCount: Int = 0,
+        val mediaSize: Long = -1L,
     ) : SyncMessage()
+
+    /** Master -> client: show 0-based [page] of the current PDF presentation immediately. */
+    @Serializable
+    @SerialName("ShowPage")
+    data class ShowPage(val page: Int) : SyncMessage()
 
     /** Master -> client: playback ended (STATE_ENDED). */
     @Serializable
@@ -82,6 +103,11 @@ sealed class SyncMessage {
     @Serializable
     @SerialName("SpeedReq")
     data class SpeedReq(val speed: Float) : SyncMessage()
+
+    /** Client -> master: request the 0-based PDF [page] be shown to everyone. */
+    @Serializable
+    @SerialName("PageReq")
+    data class PageReq(val page: Int) : SyncMessage()
 }
 
 /** Shared [Json] for DataChannel control messages. */

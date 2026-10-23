@@ -1,10 +1,19 @@
 package com.syncstream.ui.client
 
 import android.app.Application
+import android.content.ContentValues
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.pdf.PdfRenderer
+import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.Environment
+import android.os.ParcelFileDescriptor
+import android.provider.MediaStore
 import android.util.Log
+import android.webkit.MimeTypeMap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.syncstream.appContainer
@@ -13,6 +22,7 @@ import com.syncstream.discovery.DiscoveryState
 import com.syncstream.discovery.NsdDiscoverer
 import com.syncstream.signaling.ConnectionState
 import com.syncstream.core.PeerState
+import com.syncstream.core.renderPdfPage
 import com.syncstream.signaling.SignalingClient
 import com.syncstream.sync.ClockSync
 import com.syncstream.sync.PlayheadInfo
@@ -20,6 +30,8 @@ import com.syncstream.sync.SyncEngine
 import com.syncstream.sync.AudioReceiver
 import com.syncstream.webrtc.ClientPeerManager
 import com.syncstream.webrtc.WebRtcCore
+import java.io.File
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,6 +40,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.webrtc.DataChannel
 import org.webrtc.EglBase
@@ -89,6 +104,38 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _remoteVideoTrack = MutableStateFlow<VideoTrack?>(null)
     val remoteVideoTrack: StateFlow<VideoTrack?> = _remoteVideoTrack.asStateFlow()
+
+    // ---- Discrete presentations (image / pdf / file), fetched from the master's GET /media ----
+
+    /** Decoded photo, or the rendered current PDF page, when the host presents one. */
+    private val _sharedBitmap = MutableStateFlow<Bitmap?>(null)
+    val sharedBitmap: StateFlow<Bitmap?> = _sharedBitmap.asStateFlow()
+
+    /** True while the current item's payload is being downloaded from the host. */
+    private val _mediaDownloading = MutableStateFlow(false)
+    val mediaDownloading: StateFlow<Boolean> = _mediaDownloading.asStateFlow()
+
+    /** Download progress 0..1 while [mediaDownloading] (-1 when the host didn't send a size). */
+    private val _mediaProgress = MutableStateFlow(0f)
+    val mediaProgress: StateFlow<Float> = _mediaProgress.asStateFlow()
+
+    /** The fully received file when the host shares a generic file; null until it has arrived. */
+    private val _sharedFile = MutableStateFlow<File?>(null)
+    val sharedFile: StateFlow<File?> = _sharedFile.asStateFlow()
+
+    /** Outcome of [saveSharedFile] / [saveSharedFileTo] for the current item. */
+    private val _saveState = MutableStateFlow<SaveState>(SaveState.Idle)
+    val saveState: StateFlow<SaveState> = _saveState.asStateFlow()
+
+    private var loadedMediaId: String? = null
+    private var mediaDownloadJob: Job? = null
+
+    /** Guest-side renderer over the downloaded PDF; one page rendered at a time under [pdfMutex]. */
+    private var pdfRenderer: PdfRenderer? = null
+    private var pdfFd: ParcelFileDescriptor? = null
+    private val pdfMutex = Mutex()
+    private var renderedPage = -1
+    private var renderJob: Job? = null
 
     // ---- Joining ----
     private val _joinStatus = MutableStateFlow<JoinStatus>(JoinStatus.Idle)
@@ -218,7 +265,12 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
 
         val sync = SyncEngine(viewModelScope)
         syncEngine = sync
-        collectors += viewModelScope.launch { sync.clientPlayhead.collect { _playhead.value = it } }
+        collectors += viewModelScope.launch {
+            sync.clientPlayhead.collect { ph ->
+                _playhead.value = ph
+                onPlayheadMediaUpdated(ph)
+            }
+        }
 
         val receiver = AudioReceiver(clk)
         audioReceiver = receiver
@@ -280,6 +332,76 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setSpeed(speed: Float) {
         syncEngine?.sendSpeedRequest(speed)
+    }
+
+    /** PDF: ask the host to show 0-based [page] to everyone (like play/pause, it's for the room). */
+    fun showPage(page: Int) {
+        syncEngine?.sendPageRequest(page)
+    }
+
+    fun nextPage() = showPage(_playhead.value.mediaPage + 1)
+    fun previousPage() = showPage(_playhead.value.mediaPage - 1)
+
+    /**
+     * Saves the received file into the device's Downloads via MediaStore (API 29+; no storage
+     * permission needed). Older devices use [saveSharedFileTo] with a SAF-created document.
+     */
+    fun saveSharedFile() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        val src = _sharedFile.value ?: return
+        val ph = _playhead.value
+        _saveState.value = SaveState.Saving
+        viewModelScope.launch {
+            val name = ph.mediaTitle ?: src.name
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val resolver = getApplication<Application>().contentResolver
+                    val values = ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                        put(MediaStore.MediaColumns.MIME_TYPE, mimeTypeFor(name))
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                        put(MediaStore.MediaColumns.IS_PENDING, 1)
+                    }
+                    val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                        ?: error("insert returned null")
+                    resolver.openOutputStream(uri)?.use { out -> src.inputStream().use { it.copyTo(out) } }
+                        ?: error("no output stream")
+                    values.clear()
+                    values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    resolver.update(uri, values, null, null)
+                    name
+                }
+            }
+            _saveState.value = result.fold(
+                onSuccess = { SaveState.Saved(it) },
+                onFailure = { Log.w(TAG, "saveSharedFile failed", it); SaveState.Failed },
+            )
+        }
+    }
+
+    /** Copies the received file into [target] (a document the guest created via SAF). */
+    fun saveSharedFileTo(target: Uri) {
+        val src = _sharedFile.value ?: return
+        val name = _playhead.value.mediaTitle ?: src.name
+        _saveState.value = SaveState.Saving
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                runCatching {
+                    getApplication<Application>().contentResolver.openOutputStream(target)?.use { out ->
+                        src.inputStream().use { it.copyTo(out) }
+                    } ?: error("no output stream")
+                }.isSuccess
+            }
+            _saveState.value = if (ok) SaveState.Saved(name) else SaveState.Failed
+        }
+    }
+
+    /** MIME type guessed from the shared file's name (for the Downloads entry). */
+    fun sharedFileMimeType(): String = mimeTypeFor(_playhead.value.mediaTitle ?: _sharedFile.value?.name ?: "")
+
+    private fun mimeTypeFor(name: String): String {
+        val ext = name.substringAfterLast('.', "").lowercase()
+        return MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
     }
 
     // ---- Wiring ----
@@ -392,7 +514,112 @@ class ClientViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Folds the heartbeat's presentation fields into the discrete-media state: a new image/pdf/
+     * file id starts a download from the host (cached per id under cacheDir), a PDF page change
+     * re-renders from the local copy, and a switch back to timed media clears everything.
+     */
+    private fun onPlayheadMediaUpdated(ph: PlayheadInfo) {
+        val discrete = ph.mediaKind == "image" || ph.mediaKind == "pdf" || ph.mediaKind == "file"
+        if (!discrete) {
+            if (loadedMediaId != null || _sharedBitmap.value != null || mediaDownloadJob != null) resetDiscreteMedia()
+            return
+        }
+        val id = ph.mediaId ?: return
+        if (id == loadedMediaId) {
+            // Same item: only a PDF page flip needs work, and only once it has been downloaded.
+            if (ph.mediaKind == "pdf" && pdfRenderer != null && ph.mediaPage != renderedPage) {
+                renderJob?.cancel()
+                renderJob = viewModelScope.launch { renderSharedPdfPage(ph.mediaPage) }
+            }
+            return
+        }
+        resetDiscreteMedia()
+        loadedMediaId = id
+        mediaDownloadJob = viewModelScope.launch {
+            _mediaDownloading.value = true
+            _mediaProgress.value = 0f
+            val dest = File(getApplication<Application>().cacheDir, "shared_$id")
+            val cached = dest.exists() && dest.length() > 0L
+            val ok = cached || signaling?.downloadMedia(id, dest) { read, total ->
+                _mediaProgress.value = if (total > 0L) (read.toFloat() / total).coerceIn(0f, 1f) else -1f
+            } == true
+            if (!ok || !dest.exists()) {
+                loadedMediaId = null
+                _mediaDownloading.value = false
+                return@launch
+            }
+            _mediaProgress.value = 1f
+            when (ph.mediaKind) {
+                "image" -> _sharedBitmap.value = decodeSampledFile(dest)
+                "pdf" -> if (openSharedPdf(dest)) renderSharedPdfPage(_playhead.value.mediaPage)
+                "file" -> _sharedFile.value = dest
+            }
+            _mediaDownloading.value = false
+        }
+    }
+
+    private fun resetDiscreteMedia() {
+        mediaDownloadJob?.cancel()
+        mediaDownloadJob = null
+        renderJob?.cancel()
+        renderJob = null
+        closeSharedPdf()
+        loadedMediaId = null
+        _sharedBitmap.value = null
+        _sharedFile.value = null
+        _saveState.value = SaveState.Idle
+        _mediaDownloading.value = false
+        _mediaProgress.value = 0f
+    }
+
+    private suspend fun decodeSampledFile(file: File): Bitmap? = withContext(Dispatchers.IO) {
+        runCatching {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(file.absolutePath, bounds)
+            var sample = 1
+            val maxDim = maxOf(bounds.outWidth, bounds.outHeight)
+            while (maxDim / sample > 2048) sample *= 2
+            val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+            BitmapFactory.decodeFile(file.absolutePath, opts)
+        }.getOrNull()
+    }
+
+    private suspend fun openSharedPdf(file: File): Boolean = withContext(Dispatchers.IO) {
+        pdfMutex.withLock {
+            runCatching {
+                val fd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+                pdfFd = fd
+                pdfRenderer = PdfRenderer(fd)
+                renderedPage = -1
+                true
+            }.getOrDefault(false)
+        }
+    }
+
+    private suspend fun renderSharedPdfPage(page: Int) {
+        val bitmap = withContext(Dispatchers.IO) {
+            pdfMutex.withLock {
+                val renderer = pdfRenderer ?: return@withLock null
+                renderPdfPage(renderer, page)
+            }
+        }
+        if (bitmap != null) {
+            renderedPage = page
+            _sharedBitmap.value = bitmap
+        }
+    }
+
+    private fun closeSharedPdf() {
+        runCatching { pdfRenderer?.close() }
+        runCatching { pdfFd?.close() }
+        pdfRenderer = null
+        pdfFd = null
+        renderedPage = -1
+    }
+
     private fun teardownRuntime() {
+        resetDiscreteMedia()
         statsJob?.cancel()
         statsJob = null
         collectors.forEach { it.cancel() }
@@ -454,4 +681,12 @@ sealed interface JoinStatus {
     data object Idle : JoinStatus
     data object Trying : JoinStatus
     data class Done(val result: MatchResult) : JoinStatus
+}
+
+/** Outcome of saving a shared file to the device. */
+sealed interface SaveState {
+    data object Idle : SaveState
+    data object Saving : SaveState
+    data class Saved(val name: String) : SaveState
+    data object Failed : SaveState
 }

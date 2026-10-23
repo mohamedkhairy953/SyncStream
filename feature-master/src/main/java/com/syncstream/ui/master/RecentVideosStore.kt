@@ -8,8 +8,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** A previously-streamed video the master can re-pick from its recent list. */
-data class RecentVideo(val uri: String, val name: String)
+/** A previously-streamed item the master can re-pick from its recent list. [kind] is the presentation type ("video"/"audio"). */
+data class RecentVideo(val uri: String, val name: String, val kind: String = "video")
 
 /**
  * Persists the last [MAX] videos the master actually streamed, newest-first and de-duped by URI,
@@ -26,10 +26,10 @@ class RecentVideosStore(context: Context) {
     val recent: StateFlow<List<RecentVideo>> = _recent.asStateFlow()
 
     /** Promote [uri] to the front (de-duped), cap to [MAX], and persist. */
-    fun record(uri: Uri, name: String) {
+    fun record(uri: Uri, name: String, kind: String = "video") {
         val key = uri.toString()
         val deduped = _recent.value.filterNot { it.uri == key }
-        val updated = (listOf(RecentVideo(key, name)) + deduped).take(MAX)
+        val updated = (listOf(RecentVideo(key, name, kind)) + deduped).take(MAX)
         _recent.value = updated
         persist(updated)
     }
@@ -41,14 +41,16 @@ class RecentVideosStore(context: Context) {
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
                 val u = o.optString("uri")
-                if (u.isNotEmpty()) add(RecentVideo(u, o.optString("name", u)))
+                if (u.isNotEmpty()) {
+                    add(RecentVideo(u, o.optString("name", u), o.optString("kind", "video")))
+                }
             }
         }
     }.getOrDefault(emptyList())
 
     private fun persist(list: List<RecentVideo>) {
         val arr = JSONArray()
-        list.forEach { arr.put(JSONObject().put("uri", it.uri).put("name", it.name)) }
+        list.forEach { arr.put(JSONObject().put("uri", it.uri).put("name", it.name).put("kind", it.kind)) }
         prefs.edit().putString(KEY, arr.toString()).apply()
     }
 

@@ -6,8 +6,12 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.IBinder
+import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -16,11 +20,15 @@ import com.syncstream.player.PlaybackInfo
 import com.syncstream.webrtc.ExoSurfaceVideoSource
 import com.syncstream.service.MasterStreamingService
 import com.syncstream.signaling.ClientHandle
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import org.webrtc.EglBase
 
 /**
@@ -69,6 +77,33 @@ class MasterViewModel(app: Application) : AndroidViewModel(app) {
     private val _selectedUri = MutableStateFlow<Uri?>(null)
     val selectedUri: StateFlow<Uri?> = _selectedUri.asStateFlow()
 
+    /** Presentation kind of the selection ("video"/"audio"/"image"/"pdf"/"file"), sent to guests via the heartbeat. */
+    private var selectedKind: String = "video"
+
+    /** Display name of the selection, shown on the master's audio/image/pdf/file presentation. */
+    private val _selectedName = MutableStateFlow<String?>(null)
+    val selectedName: StateFlow<String?> = _selectedName.asStateFlow()
+
+    /** Size in bytes of the selection (-1 when unknown); shown on the file presentation. */
+    private val _selectedSize = MutableStateFlow(-1L)
+    val selectedSize: StateFlow<Long> = _selectedSize.asStateFlow()
+
+    /** Decoded bitmap of the current image, or the rendered current PDF page (`kind` image/pdf). */
+    private val _selectedBitmap = MutableStateFlow<Bitmap?>(null)
+    val selectedBitmap: StateFlow<Bitmap?> = _selectedBitmap.asStateFlow()
+
+    /** Current 0-based PDF page and page count, mirrored from the service (0/0 when not a PDF). */
+    private val _mediaPage = MutableStateFlow(0)
+    val mediaPage: StateFlow<Int> = _mediaPage.asStateFlow()
+    private val _mediaPageCount = MutableStateFlow(0)
+    val mediaPageCount: StateFlow<Int> = _mediaPageCount.asStateFlow()
+
+    /** Open renderer for the selected PDF; pages are rendered one at a time under [pdfMutex]. */
+    private var pdfFd: ParcelFileDescriptor? = null
+    private var pdfRenderer: PdfRenderer? = null
+    private val pdfMutex = Mutex()
+    private var renderJob: Job? = null
+
     /** Last 10 videos that were actually streamed (persisted); newest first. */
     private val recentStore = RecentVideosStore(app)
     val recentVideos: StateFlow<List<RecentVideo>> = recentStore.recent
@@ -92,7 +127,7 @@ class MasterViewModel(app: Application) : AndroidViewModel(app) {
             // BEFORE a video is picked. startStreaming() is idempotent and does not require media;
             // the selected URI (if any) is loaded into the already-live session below.
             svc.startStreaming()
-            _selectedUri.value?.let { svc.setMediaUri(it) }
+            _selectedUri.value?.let { svc.setMediaUri(it, selectedKind, displayName(it)) }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -120,26 +155,48 @@ class MasterViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Selects [uri] and loads it into the (already live) room PAUSED at 0; the host starts playback
-     * from the player ("Play for everyone" or the play button). Loads exactly once: if the service
-     * isn't bound yet, [onServiceConnected] loads the selection instead.
+     * Selects [uri] (presentation [kind]) and loads it into the (already live) room PAUSED at 0;
+     * the host starts playback from the player ("Play for everyone" or the play button). Loads
+     * exactly once: if the service isn't bound yet, [onServiceConnected] loads the selection
+     * instead.
      */
-    fun onMediaPicked(uri: Uri) {
+    fun onMediaPicked(uri: Uri, kind: String = "video") {
         val resolver = getApplication<Application>().contentResolver
         runCatching {
             resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
+        val name = displayName(uri)
         _selectedUri.value = uri
+        selectedKind = kind
+        _selectedName.value = name
+        _selectedSize.value = querySize(uri)
+        renderJob?.cancel()
+        closePdf()
+        _selectedBitmap.value = null
+        _mediaPage.value = 0
+        _mediaPageCount.value = 0
+        when (kind) {
+            "image" -> renderJob = viewModelScope.launch {
+                _selectedBitmap.value = decodeSampledBitmap(uri)
+            }
+            "pdf" -> renderJob = viewModelScope.launch {
+                if (openPdf(uri)) renderPdfPage(0)
+            }
+        }
+        if (kind != "video" && kind != "audio") {
+            lastRecordedUri = uri
+            recentStore.record(uri, name, kind)
+        }
         val svc = service ?: return
-        svc.setMediaUri(uri)
+        svc.setMediaUri(uri, kind, name)
         // The load is synchronous and paused; reflect it now so the player screen's first
         // composition (invite auto-open) doesn't see the previous video's "playing".
-        _playback.value = _playback.value.copy(playing = false, positionMs = 0L, durationMs = 0L, ended = false)
+        _playback.value = _playback.value.copy(playing = false, positionMs = 0L, durationMs = 0L, ended = false, kind = kind)
     }
 
-    /** Re-select a video from the recent-history list. */
+    /** Re-select an item from the recent-history list (video or audio, per its recorded kind). */
     fun playRecent(recent: RecentVideo) {
-        onMediaPicked(Uri.parse(recent.uri))
+        onMediaPicked(Uri.parse(recent.uri), recent.kind)
     }
 
     /** Makes the room live (idempotent; binding already does this). Does not reload the media. */
@@ -164,6 +221,14 @@ class MasterViewModel(app: Application) : AndroidViewModel(app) {
         service?.setSpeed(speed)
     }
 
+    /** PDF only: show 0-based [page] to everyone (the service clamps and broadcasts). */
+    fun showPage(page: Int) {
+        service?.showPage(page)
+    }
+
+    fun nextPage() = showPage(_mediaPage.value + 1)
+    fun previousPage() = showPage(_mediaPage.value - 1)
+
     /** Whether POST_NOTIFICATIONS is currently granted (used to drive the runtime request). */
     fun hasNotificationPermission(): Boolean {
         if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU) return true
@@ -187,6 +252,18 @@ class MasterViewModel(app: Application) : AndroidViewModel(app) {
         collectors += viewModelScope.launch { svc.endpoint.collect { _endpoint.value = it } }
         collectors += viewModelScope.launch { svc.thermalWarning.collect { _thermalWarning.value = it } }
         collectors += viewModelScope.launch { svc.notificationsDenied.collect { _notificationsDenied.value = it } }
+        collectors += viewModelScope.launch { svc.mediaPageCount.collect { _mediaPageCount.value = it } }
+        collectors += viewModelScope.launch {
+            svc.mediaPage.collect { page ->
+                val changed = page != _mediaPage.value
+                _mediaPage.value = page
+                // A guest's page request lands here too: re-render the host's own view.
+                if (changed && selectedKind == "pdf" && pdfRenderer != null) {
+                    renderJob?.cancel()
+                    renderJob = viewModelScope.launch { renderPdfPage(page) }
+                }
+            }
+        }
     }
 
     /**
@@ -199,7 +276,7 @@ class MasterViewModel(app: Application) : AndroidViewModel(app) {
         val uri = _selectedUri.value ?: return
         if (uri == lastRecordedUri) return
         lastRecordedUri = uri
-        recentStore.record(uri, displayName(uri))
+        recentStore.record(uri, displayName(uri), selectedKind)
     }
 
     /** Resolves a human-readable title for [uri], falling back to its last path segment. */
@@ -213,12 +290,68 @@ class MasterViewModel(app: Application) : AndroidViewModel(app) {
         return name ?: uri.lastPathSegment ?: uri.toString()
     }
 
+    private suspend fun decodeSampledBitmap(uri: Uri): Bitmap? = withContext(Dispatchers.IO) {
+        val resolver = getApplication<Application>().contentResolver
+        runCatching {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+            var sample = 1
+            val maxDim = maxOf(bounds.outWidth, bounds.outHeight)
+            while (maxDim / sample > 2048) sample *= 2
+            val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+            resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) }
+        }.getOrNull()
+    }
+
+    /** Size in bytes from the document provider, or -1 when it doesn't say. */
+    private fun querySize(uri: Uri): Long {
+        val resolver = getApplication<Application>().contentResolver
+        return runCatching {
+            resolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { c ->
+                if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else -1L
+            } ?: -1L
+        }.getOrDefault(-1L)
+    }
+
+    // ---- PDF rendering (host's own view; guests render from their downloaded copy) ----
+
+    private suspend fun openPdf(uri: Uri): Boolean = withContext(Dispatchers.IO) {
+        pdfMutex.withLock {
+            runCatching {
+                val fd = getApplication<Application>().contentResolver.openFileDescriptor(uri, "r")
+                    ?: return@withLock false
+                pdfFd = fd
+                pdfRenderer = PdfRenderer(fd)
+                true
+            }.getOrDefault(false)
+        }
+    }
+
+    private suspend fun renderPdfPage(page: Int) {
+        val bitmap = withContext(Dispatchers.IO) {
+            pdfMutex.withLock {
+                val renderer = pdfRenderer ?: return@withLock null
+                com.syncstream.core.renderPdfPage(renderer, page)
+            }
+        }
+        if (bitmap != null) _selectedBitmap.value = bitmap
+    }
+
+    private fun closePdf() {
+        runCatching { pdfRenderer?.close() }
+        runCatching { pdfFd?.close() }
+        pdfRenderer = null
+        pdfFd = null
+    }
+
     private fun cancelCollectors() {
         collectors.forEach { it.cancel() }
         collectors.clear()
     }
 
     override fun onCleared() {
+        renderJob?.cancel()
+        closePdf()
         unbind()
         super.onCleared()
     }

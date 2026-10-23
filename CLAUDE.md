@@ -31,6 +31,25 @@ public-API contract of every module.
 ./gradlew :app:installDebug      # install on a connected device
 ```
 
+## Lab devices (Wi-Fi ADB)
+
+Two physical devices are used for master/client testing. Their addresses are remembered in
+`tools/wifi-adb-devices.json` (gitignored) and can be reconnected with:
+
+```powershell
+./tools/wifi-adb.ps1 list        # saved devices + online state
+./tools/wifi-adb.ps1 reconnect   # reconnect everything (re-learns ports)
+```
+
+| Name     | Model           | Address              |
+| -------- | --------------- | -------------------- |
+| `tablet` | Samsung SM-T505N | `192.168.1.6:5555`   |
+| `realme` | realme RMX3780  | `192.168.1.9:<port>` |
+
+The realme uses Android 11+ Wireless debugging, so its port changes after every
+toggle/reboot. Re-pair with `./tools/wifi-adb.ps1 pair -Name realme -Ip <ip> -Port <pair-port> -Code <code>`,
+then connect with the port shown next to "IP address & port".
+
 ## Module conventions
 
 - Module Gradle config lives in `build-logic` convention plugins

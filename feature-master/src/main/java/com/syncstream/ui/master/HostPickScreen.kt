@@ -7,7 +7,10 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
@@ -27,7 +30,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
@@ -36,6 +41,7 @@ import com.syncstream.ui.components.BannerTone
 import com.syncstream.ui.components.ConfirmDialog
 import com.syncstream.ui.components.EmptyState
 import com.syncstream.ui.components.InfoBanner
+import com.syncstream.ui.components.MediaKinds
 import com.syncstream.ui.components.PrimaryButton
 import com.syncstream.ui.components.RoomChip
 import com.syncstream.ui.components.SecondaryButton
@@ -43,11 +49,11 @@ import com.syncstream.ui.components.VideoThumbnail
 import com.syncstream.ui.theme.SyncSpacing
 
 /**
- * Host "Pick a video" screen. Binds [com.syncstream.service.MasterStreamingService] (via the
+ * Host "Pick media" screen. Binds [com.syncstream.service.MasterStreamingService] (via the
  * ViewModel), which makes the room live so guests can join while the host chooses. Choosing a
- * recent video or a file from the picker loads it paused and calls [onVideoChosen] (the host
- * starts playback from the player); leaving asks
- * for confirmation and ends the room via [onEndRoom].
+ * recent item or a document from the picker (video, audio, photo, PDF or any file) loads it and
+ * calls [onVideoChosen] (timed media starts paused; the host plays it from the player); leaving
+ * asks for confirmation and ends the room via [onEndRoom].
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -78,16 +84,21 @@ fun HostPickScreen(
         ActivityResultContracts.RequestPermission(),
     ) { /* result reflected via service.notificationsDenied after start */ }
 
-    // ---- File picker ----
+    // ---- Document picker (SAF, no storage permission). One launcher; the kind chosen when the
+    // picker was opened decides how the result is presented.
+    var pickKind by rememberSaveable { mutableStateOf(MediaKinds.VIDEO) }
     val openDocumentLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uri ->
         uri?.let {
-            viewModel.onMediaPicked(it)
+            viewModel.onMediaPicked(it, pickKind)
             onVideoChosen()
         }
     }
-    val browse = { openDocumentLauncher.launch(arrayOf("video/*")) }
+    val browse = { kind: String ->
+        pickKind = kind
+        openDocumentLauncher.launch(MediaKinds.mimeTypes(kind))
+    }
 
     BackHandler { confirmEnd = true }
 
@@ -99,7 +110,7 @@ fun HostPickScreen(
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "End room")
                     }
                 },
-                title = { Text("Pick a video") },
+                title = { Text("Pick media") },
                 actions = {
                     // End inset so the chip / status text sits inside the bar instead of touching
                     // the screen edge.
@@ -156,9 +167,9 @@ fun HostPickScreen(
                 item(span = { GridItemSpan(maxLineSpan) }) {
                     EmptyState(
                         Icons.Filled.VideoLibrary,
-                        "No recent videos",
-                        "Pick a video from this device to start the room.",
-                        action = { SecondaryButton("Browse device…", { browse() }, icon = Icons.Filled.VideoLibrary) },
+                        "No recent media",
+                        "Share a video, song, photo, PDF or any file from this device to start the room.",
+                        action = { PickButtons(onPick = browse) },
                     )
                 }
             } else {
@@ -166,13 +177,18 @@ fun HostPickScreen(
                     Text("Recent", style = MaterialTheme.typography.labelLarge)
                 }
                 items(recentVideos, key = { it.uri }) { recent ->
-                    VideoThumbnail(recent.name, null, onClick = {
-                        viewModel.playRecent(recent)
-                        onVideoChosen()
-                    })
+                    VideoThumbnail(
+                        recent.name,
+                        null,
+                        icon = MediaKinds.icon(recent.kind),
+                        onClick = {
+                            viewModel.playRecent(recent)
+                            onVideoChosen()
+                        },
+                    )
                 }
                 item(span = { GridItemSpan(maxLineSpan) }) {
-                    SecondaryButton("Browse device…", { browse() }, icon = Icons.Filled.VideoLibrary)
+                    PickButtons(onPick = browse)
                 }
             }
 
@@ -208,5 +224,26 @@ fun HostPickScreen(
             onDismiss = { confirmEnd = false },
             destructive = true,
         )
+    }
+}
+
+/** One "browse" button per presentation kind, wrapping to the width available. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun PickButtons(onPick: (kind: String) -> Unit) {
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(SyncSpacing.s, Alignment.CenterHorizontally),
+        verticalArrangement = Arrangement.spacedBy(SyncSpacing.s),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        listOf(
+            MediaKinds.VIDEO to "Video",
+            MediaKinds.AUDIO to "Audio",
+            MediaKinds.IMAGE to "Photo",
+            MediaKinds.PDF to "PDF",
+            MediaKinds.FILE to "File",
+        ).forEach { (kind, label) ->
+            SecondaryButton(label, { onPick(kind) }, icon = MediaKinds.icon(kind))
+        }
     }
 }

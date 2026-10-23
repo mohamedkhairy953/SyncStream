@@ -23,6 +23,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
@@ -30,9 +31,18 @@ import androidx.compose.ui.unit.dp
 import com.syncstream.ui.theme.SyncSpacing
 import com.syncstream.ui.theme.SyncTheme
 
-/** 16:10 video tile; falls back to a movie icon when there is no [thumbnail]. */
+/**
+ * 16:10 media tile; falls back to [icon] (a movie by default; pass the kind's icon for audio,
+ * photos, PDFs or files) when there is no [thumbnail].
+ */
 @Composable
-fun VideoThumbnail(title: String, thumbnail: ImageBitmap?, onClick: () -> Unit, modifier: Modifier = Modifier) {
+fun VideoThumbnail(
+    title: String,
+    thumbnail: ImageBitmap?,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    icon: ImageVector = Icons.Filled.Movie,
+) {
     Box(
         modifier
             .fillMaxWidth()
@@ -45,7 +55,7 @@ fun VideoThumbnail(title: String, thumbnail: ImageBitmap?, onClick: () -> Unit, 
             Image(thumbnail, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
         } else {
             Icon(
-                Icons.Filled.Movie,
+                icon,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.align(Alignment.Center).size(32.dp),
