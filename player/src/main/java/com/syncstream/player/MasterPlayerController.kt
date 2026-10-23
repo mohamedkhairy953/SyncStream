@@ -91,9 +91,12 @@ class MasterPlayerController(
     private val listener = object : Player.Listener {
         override fun onVideoSizeChanged(videoSize: VideoSize) {
             // MANDATORY: size the capture texture before frames flow. Ignore unappliedRotationDegrees
-            // (deprecated, always 0).
+            // (deprecated, always 0). Apply pixelWidthHeightRatio for non-square pixel videos so the
+            // captured texture reflects the true display aspect ratio.
             if (videoSize.width > 0 && videoSize.height > 0) {
-                videoSource.setTextureSize(videoSize.width, videoSize.height)
+                val par = if (videoSize.pixelWidthHeightRatio > 0f) videoSize.pixelWidthHeightRatio else 1f
+                val displayWidth = (videoSize.width * par).toInt().coerceAtLeast(1)
+                videoSource.setTextureSize(displayWidth, videoSize.height)
             }
         }
 
@@ -159,6 +162,9 @@ class MasterPlayerController(
     }
 
     fun play() {
+        if (player.playbackState == Player.STATE_ENDED) {
+            player.seekTo(0L)
+        }
         player.play()
     }
 

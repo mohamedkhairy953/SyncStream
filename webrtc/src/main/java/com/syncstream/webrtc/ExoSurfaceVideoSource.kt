@@ -37,7 +37,15 @@ class ExoSurfaceVideoSource(private val core: WebRtcCore) {
 
     init {
         // Default output cap until adaptOutputFormat is called with a different budget.
-        videoSource.adaptOutputFormat(DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_FPS)
+        // Pass both landscape (1280x720) and portrait (720x1280) bounds so WebRTC's VideoAdapter
+        // preserves the native aspect ratio of portrait and landscape videos alike without cropping.
+        videoSource.adaptOutputFormat(
+            DEFAULT_WIDTH,
+            DEFAULT_HEIGHT,
+            DEFAULT_HEIGHT,
+            DEFAULT_WIDTH,
+            DEFAULT_FPS,
+        )
         start()
     }
 
@@ -79,11 +87,14 @@ class ExoSurfaceVideoSource(private val core: WebRtcCore) {
     /**
      * Caps the output resolution/frame rate of the shared source. Default is
      * [DEFAULT_WIDTH]x[DEFAULT_HEIGHT]@[DEFAULT_FPS]; SEVERE thermal pressure should drop this to
-     * 960x540@24 via the caller.
+     * 960x540@24 via the caller. Configures both landscape and portrait bounds so portrait videos
+     * are not cropped into a landscape box.
      */
     fun adaptOutputFormat(width: Int, height: Int, fps: Int) {
         if (released) return
-        videoSource.adaptOutputFormat(width, height, fps)
+        val longEdge = maxOf(width, height)
+        val shortEdge = minOf(width, height)
+        videoSource.adaptOutputFormat(longEdge, shortEdge, shortEdge, longEdge, fps)
     }
 
     /** Adds a local-preview sink (the master's `SurfaceViewRenderer`) to the shared track. */

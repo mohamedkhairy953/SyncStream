@@ -105,6 +105,7 @@ class MasterStreamingService : LifecycleService() {
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+    private var multicastLock: WifiManager.MulticastLock? = null
     private var heartbeatJob: Job? = null
 
     /** Playback + advertise observers of the current session; cancelled in [stopStreaming]. */
@@ -467,8 +468,16 @@ class MasterStreamingService : LifecycleService() {
         }
 
         override fun onPeerStateChanged(sessionId: String, state: PeerState) {
-            // FSM transitions are reflected in ClientRegistry via the per-client ClientFsm;
-            // nothing extra needed here beyond surfacing for logging.
+            if (state == PeerState.CONNECTED) {
+                // If the host is currently paused, re-seek to the current position so ExoPlayer
+                // re-renders the paused frame into the shared WebRTC VideoSource for the new peer.
+                mainHandler.post {
+                    val pc = playerController ?: return@post
+                    if (!pc.isPlaying()) {
+                        pc.seekTo(pc.currentPositionMs())
+                    }
+                }
+            }
         }
 
         override fun onCmdChannelOpen(sessionId: String, channel: DataChannel) {
@@ -564,6 +573,10 @@ class MasterStreamingService : LifecycleService() {
             setReferenceCounted(false)
             acquire()
         }
+        multicastLock = wifi?.createMulticastLock(MULTICASTLOCK_TAG)?.apply {
+            setReferenceCounted(false)
+            acquire()
+        }
     }
 
     private fun releaseLocks() {
@@ -571,6 +584,8 @@ class MasterStreamingService : LifecycleService() {
         wakeLock = null
         wifiLock?.let { if (it.isHeld) it.release() }
         wifiLock = null
+        multicastLock?.let { if (it.isHeld) it.release() }
+        multicastLock = null
     }
 
     /**
@@ -657,5 +672,6 @@ class MasterStreamingService : LifecycleService() {
         private const val NOTIFICATION_ID = 1001
         private const val WAKELOCK_TAG = "SyncStream::MasterWakeLock"
         private const val WIFILOCK_TAG = "SyncStream::MasterWifiLock"
+        private const val MULTICASTLOCK_TAG = "SyncStream::MasterMulticastLock"
     }
 }
